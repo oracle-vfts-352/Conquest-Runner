@@ -1,0 +1,28 @@
+# Dependencies and builds
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!.env.test
+
+# AWS local files and deployment settings
+.aws-sam/
+samconfig.toml
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Editor and operating system
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
