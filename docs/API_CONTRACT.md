@@ -1,5 +1,3 @@
-
-@'
 # ConquestRunner — API Contract
 
 ## 1. Purpose
@@ -305,6 +303,3 @@ Before implementation is considered complete, agree on:
 7. Whether the capture result reports net gained area, enclosed polygon area, or both.
 
 Do not add endpoints or fields independently without updating this contract and the relevant tests.
-'@ | Set-Content -Path .\docs\API_CONTRACT.md -Encoding utf8
-
-Write-Host "API_CONTRACT.md created."
