@@ -1,0 +1,22 @@
+﻿AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ConquestRunner serverless application
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/api/
+      Handler: handler.lambda_handler
+      Events:
+        HealthCheck:
+          Type: HttpApi
+          Properties:
+            Path: /api/v1/health
+            Method: GET
