@@ -1,6 +1,6 @@
 import pytest
 
-from errors import INVALID_ROUTE, ApiError
+from errors import INVALID_REQUEST, ApiError
 from request_validation import parse_sample
 
 
@@ -15,12 +15,12 @@ def make_sample(**overrides):
     return sample
 
 
-def assert_invalid_route(raw, expected_text):
+def assert_invalid_request(raw, expected_text):
     with pytest.raises(ApiError) as exc_info:
         parse_sample(raw, 2)
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.code == INVALID_ROUTE
+    assert exc_info.value.code == INVALID_REQUEST
     assert expected_text in exc_info.value.message
 
 
@@ -51,19 +51,19 @@ def test_accuracy_of_zero_is_accepted():
     "latitude", [90.1, -90.1, "34.7", None, True, float("nan"), float("inf")]
 )
 def test_bad_latitude_is_rejected(latitude):
-    assert_invalid_route(make_sample(latitude=latitude), "route[2].latitude")
+    assert_invalid_request(make_sample(latitude=latitude), "route[2].latitude")
 
 
 @pytest.mark.parametrize(
     "longitude", [180.1, -180.1, "135.4", None, False, float("nan"), float("-inf")]
 )
 def test_bad_longitude_is_rejected(longitude):
-    assert_invalid_route(make_sample(longitude=longitude), "route[2].longitude")
+    assert_invalid_request(make_sample(longitude=longitude), "route[2].longitude")
 
 
 @pytest.mark.parametrize("accuracy", [-1, "12", None, True, float("nan")])
 def test_bad_accuracy_is_rejected(accuracy):
-    assert_invalid_route(
+    assert_invalid_request(
         make_sample(accuracyMeters=accuracy), "route[2].accuracyMeters"
     )
 
@@ -81,7 +81,7 @@ def test_bad_accuracy_is_rejected(accuracy):
     ],
 )
 def test_bad_timestamp_is_rejected(timestamp):
-    assert_invalid_route(make_sample(timestamp=timestamp), "route[2].timestamp")
+    assert_invalid_request(make_sample(timestamp=timestamp), "route[2].timestamp")
 
 
 @pytest.mark.parametrize(
@@ -91,13 +91,13 @@ def test_missing_field_is_rejected(missing):
     sample = make_sample()
     del sample[missing]
 
-    assert_invalid_route(sample, f"route[2].{missing} is required")
+    assert_invalid_request(sample, f"route[2].{missing} is required")
 
 
 def test_unknown_field_is_rejected():
-    assert_invalid_route(make_sample(playerId="someone-else"), "playerId")
+    assert_invalid_request(make_sample(playerId="someone-else"), "playerId")
 
 
 @pytest.mark.parametrize("raw", [None, "text", 5, [1, 2], True])
 def test_sample_that_is_not_an_object_is_rejected(raw):
-    assert_invalid_route(raw, "route[2] must be an object")
+    assert_invalid_request(raw, "route[2] must be an object")

@@ -8,14 +8,14 @@ import math
 from datetime import UTC, datetime
 
 from config import MAX_SAMPLES, MIN_SAMPLES
-from errors import INVALID_REQUEST, INVALID_ROUTE, PAYLOAD_TOO_LARGE, ApiError
+from errors import INVALID_REQUEST, ApiError
 from models import GpsSample
 
 REQUIRED_SAMPLE_FIELDS = ("latitude", "longitude", "timestamp", "accuracyMeters")
 
 
-def _invalid_route(message: str) -> ApiError:
-    return ApiError(400, INVALID_ROUTE, message)
+def _invalid(message: str) -> ApiError:
+    return ApiError(400, INVALID_REQUEST, message)
 
 
 def _is_finite_number(value: object) -> bool:
@@ -45,33 +45,31 @@ def parse_sample(raw: object, index: int) -> GpsSample:
     where = f"route[{index}]"
 
     if not isinstance(raw, dict):
-        raise _invalid_route(f"{where} must be an object.")
+        raise _invalid(f"{where} must be an object.")
 
     for name in REQUIRED_SAMPLE_FIELDS:
         if name not in raw:
-            raise _invalid_route(f"{where}.{name} is required.")
+            raise _invalid(f"{where}.{name} is required.")
 
     unknown = sorted(set(raw) - set(REQUIRED_SAMPLE_FIELDS))
     if unknown:
-        raise _invalid_route(f"{where} has unsupported field: {unknown[0]}.")
+        raise _invalid(f"{where} has unsupported field: {unknown[0]}.")
 
     latitude = raw["latitude"]
     if not _is_finite_number(latitude) or not -90 <= latitude <= 90:
-        raise _invalid_route(f"{where}.latitude must be a number from -90 to 90.")
+        raise _invalid(f"{where}.latitude must be a number from -90 to 90.")
 
     longitude = raw["longitude"]
     if not _is_finite_number(longitude) or not -180 <= longitude <= 180:
-        raise _invalid_route(f"{where}.longitude must be a number from -180 to 180.")
+        raise _invalid(f"{where}.longitude must be a number from -180 to 180.")
 
     accuracy = raw["accuracyMeters"]
     if not _is_finite_number(accuracy) or accuracy < 0:
-        raise _invalid_route(f"{where}.accuracyMeters must be a number of 0 or more.")
+        raise _invalid(f"{where}.accuracyMeters must be a number of 0 or more.")
 
     timestamp = _parse_timestamp(raw["timestamp"])
     if timestamp is None:
-        raise _invalid_route(
-            f"{where}.timestamp must be an ISO 8601 UTC time ending with Z."
-        )
+        raise _invalid(f"{where}.timestamp must be an ISO 8601 UTC time ending with Z.")
 
     return GpsSample(
         latitude=float(latitude),
@@ -111,18 +109,18 @@ def parse_capture_body(
     if len(route) > max_samples:
         raise ApiError(
             413,
-            PAYLOAD_TOO_LARGE,
+            INVALID_REQUEST,
             f"route must not contain more than {max_samples} samples.",
         )
 
     if len(route) < min_samples:
-        raise _invalid_route(f"route must contain at least {min_samples} samples.")
+        raise _invalid(f"route must contain at least {min_samples} samples.")
 
     samples = [parse_sample(raw, index) for index, raw in enumerate(route)]
 
     for index in range(1, len(samples)):
         if samples[index].timestamp <= samples[index - 1].timestamp:
-            raise _invalid_route(
+            raise _invalid(
                 f"route[{index}].timestamp must be later than route[{index - 1}].timestamp."
             )
 

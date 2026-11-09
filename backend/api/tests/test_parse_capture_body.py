@@ -2,8 +2,6 @@ import pytest
 
 from errors import (
     INVALID_REQUEST,
-    INVALID_ROUTE,
-    PAYLOAD_TOO_LARGE,
     ApiError,
 )
 from request_validation import parse_capture_body
@@ -71,39 +69,39 @@ def test_client_supplied_identity_or_result_fields_are_rejected(field):
 
 
 def test_too_few_samples_is_rejected():
-    assert_error(make_body(3), 400, INVALID_ROUTE, "at least 4 samples")
+    assert_error(make_body(3), 400, INVALID_REQUEST, "at least 4 samples")
 
 
 def test_empty_route_is_rejected():
-    assert_error({"route": []}, 400, INVALID_ROUTE, "at least 4 samples")
+    assert_error({"route": []}, 400, INVALID_REQUEST, "at least 4 samples")
 
 
 def test_too_many_samples_returns_413():
-    assert_error(make_body(7), 413, PAYLOAD_TOO_LARGE, "more than 6", max_samples=6)
+    assert_error(make_body(7), 413, INVALID_REQUEST, "more than 6", max_samples=6)
 
 
 def test_too_many_samples_is_rejected_before_checking_each_sample():
     body = {"route": ["not a sample"] * 7}
 
-    assert_error(body, 413, PAYLOAD_TOO_LARGE, "more than 6", max_samples=6)
+    assert_error(body, 413, INVALID_REQUEST, "more than 6", max_samples=6)
 
 
 def test_bad_sample_reports_its_position():
     body = make_body()
     body["route"][2]["latitude"] = 200
 
-    assert_error(body, 400, INVALID_ROUTE, "route[2].latitude")
+    assert_error(body, 400, INVALID_REQUEST, "route[2].latitude")
 
 
 def test_timestamps_that_go_backwards_are_rejected():
     body = make_body()
     body["route"][3]["timestamp"] = "2026-10-23T01:00:01Z"
 
-    assert_error(body, 400, INVALID_ROUTE, "route[3].timestamp must be later")
+    assert_error(body, 400, INVALID_REQUEST, "route[3].timestamp must be later")
 
 
 def test_repeated_timestamp_is_rejected():
     body = make_body()
     body["route"][2]["timestamp"] = body["route"][1]["timestamp"]
 
-    assert_error(body, 400, INVALID_ROUTE, "route[2].timestamp must be later")
+    assert_error(body, 400, INVALID_REQUEST, "route[2].timestamp must be later")
