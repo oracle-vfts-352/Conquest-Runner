@@ -11,5 +11,7 @@ MIN_SAMPLES = 4
 # can hold only 256 KB. The team must decide how to handle this.
 MAX_SAMPLES = 10_000
 
-# An SQS message body can be at most 256 KiB.
-MAX_MESSAGE_BYTES = 262_144
+# Largest request body the API accepts, in bytes.
+# PROPOSED, not decided yet (docs/API_CONTRACT.md section 10, item 6).
+# 10,000 samples is about 1.04 MB of JSON, so 2 MB leaves some room.
+MAX_BODY_BYTES = 2_000_000
