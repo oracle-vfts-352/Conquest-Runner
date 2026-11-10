@@ -1,22 +1,16 @@
 import json
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
-from fakes import FakeCaptureRepository
 
-from capture_service import CaptureService
-from models import GpsSample
-from ports import CaptureMessage, QueueUnavailableError, RouteObject
-from s3_route_store import S3RouteStore
+from errors import INVALID_REQUEST, ApiError
+from ports import CaptureMessage, QueueUnavailableError, RoutePayload
 from sqs_queue import SqsCaptureQueue, serialize_message
 
 MESSAGE = CaptureMessage(
     capture_id="capture_abc",
     player_id="player-1",
-    route_object=RouteObject(
-        bucket="my-test-bucket", key="captures/player-1/capture_abc/route.json"
-    ),
+    route=RoutePayload(encoding="gzip+base64", data="H4sIAAAAAAAC"),
 )
 
 
@@ -34,26 +28,14 @@ class FakeSqsClient:
         return {"MessageId": "fake-id"}
 
 
-class FakeS3Client:
-    def __init__(self):
-        self.calls = []
-
-    def put_object(self, **kwargs):
-        self.calls.append(kwargs)
-        return {}
-
-
-def test_message_has_exactly_the_proposed_fields_and_no_gps_data():
+def test_message_has_exactly_the_proposed_fields():
     body = json.loads(serialize_message(MESSAGE))
 
     assert body == {
         "schemaVersion": 1,
         "captureId": "capture_abc",
         "playerId": "player-1",
-        "routeObject": {
-            "bucket": "my-test-bucket",
-            "key": "captures/player-1/capture_abc/route.json",
-        },
+        "route": {"encoding": "gzip+base64", "data": "H4sIAAAAAAAC"},
     }
 
 
@@ -65,6 +47,35 @@ def test_send_calls_sqs_once_with_the_queue_url_and_the_message():
     assert len(client.calls) == 1
     assert client.calls[0]["QueueUrl"] == "https://example.invalid/queue"
     assert json.loads(client.calls[0]["MessageBody"])["captureId"] == "capture_abc"
+
+
+def test_message_over_the_hard_limit_is_rejected_with_413():
+    with pytest.raises(ApiError) as exc_info:
+        serialize_message(MESSAGE, max_bytes=50)
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.code == INVALID_REQUEST
+
+
+def test_message_exactly_at_the_limit_is_accepted():
+    size = len(serialize_message(MESSAGE).encode("utf-8"))
+
+    assert serialize_message(MESSAGE, max_bytes=size) == serialize_message(MESSAGE)
+    with pytest.raises(ApiError):
+        serialize_message(MESSAGE, max_bytes=size - 1)
+
+
+def test_too_large_message_is_never_sent_to_sqs():
+    client = FakeSqsClient()
+    huge = CaptureMessage(
+        "capture_abc", "player-1", RoutePayload("gzip+base64", "A" * 1_100_000)
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        SqsCaptureQueue(client, "https://example.invalid/queue").send(huge)
+
+    assert exc_info.value.status_code == 413
+    assert client.calls == []
 
 
 def test_aws_error_becomes_queue_unavailable_without_leaking_details():
@@ -86,28 +97,3 @@ def test_connection_failure_becomes_queue_unavailable():
 
     with pytest.raises(QueueUnavailableError):
         queue.send(MESSAGE)
-
-
-def test_service_with_both_adapters_points_the_message_at_the_saved_route():
-    s3_client = FakeS3Client()
-    sqs_client = FakeSqsClient()
-    service = CaptureService(
-        FakeCaptureRepository(),
-        S3RouteStore(s3_client, "my-test-bucket"),
-        SqsCaptureQueue(sqs_client, "https://example.invalid/queue"),
-    )
-    start = datetime(2026, 10, 23, 1, 0, 0, tzinfo=UTC)
-    samples = [
-        GpsSample(34.7025, 135.4959, start + timedelta(seconds=i), 10.0)
-        for i in range(4)
-    ]
-    player_id = "11111111-2222-3333-4444-555555555555"
-
-    result = service.submit(player_id, "key-0001-abcdef", samples)
-
-    message = json.loads(sqs_client.calls[0]["MessageBody"])
-    assert message["captureId"] == result.capture_id
-    assert message["playerId"] == player_id
-    assert message["routeObject"]["bucket"] == "my-test-bucket"
-    assert message["routeObject"]["key"] == s3_client.calls[0]["Key"]
-    assert len(sqs_client.calls[0]["MessageBody"]) < 1000

@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-import handler
+import capture_lambda
+from inline_route_store import unpack_route
+from ports import RoutePayload
 
-BUCKET = "test-bucket-sentinel"
 QUEUE_URL = "https://example.invalid/queue-sentinel"
 TABLE = "test-table-sentinel"
 SECRET_TEXT = "private-details"
 KEY = "key-0001-abcdef"
 
 FULL_ENV = {
-    "ROUTE_BUCKET_NAME": BUCKET,
     "CAPTURE_QUEUE_URL": QUEUE_URL,
     "CAPTURES_TABLE_NAME": TABLE,
 }
@@ -43,14 +43,6 @@ class FakeDynamo:
         self.calls.append(("update_item", kwargs))
 
 
-class FakeS3:
-    def __init__(self):
-        self.calls = []
-
-    def put_object(self, **kwargs):
-        self.calls.append(kwargs)
-
-
 class FakeSqs:
     def __init__(self):
         self.calls = []
@@ -64,7 +56,7 @@ class FakeFactory:
 
     def __init__(self):
         self.requested = []
-        self.clients = {"dynamodb": FakeDynamo(), "s3": FakeS3(), "sqs": FakeSqs()}
+        self.clients = {"dynamodb": FakeDynamo(), "sqs": FakeSqs()}
 
     def __call__(self, service_name):
         self.requested.append(service_name)
@@ -73,17 +65,17 @@ class FakeFactory:
 
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
-    handler.reset_service()
+    capture_lambda.reset_service()
     for name in FULL_ENV:
         monkeypatch.delenv(name, raising=False)
     yield
-    handler.reset_service()
+    capture_lambda.reset_service()
 
 
 @pytest.fixture
 def factory(monkeypatch):
     fake = FakeFactory()
-    monkeypatch.setattr(handler, "_client_factory", fake)
+    monkeypatch.setattr(capture_lambda, "_client_factory", fake)
     return fake
 
 
@@ -137,7 +129,7 @@ def assert_generic_500(response):
 # ---------- import ----------
 
 
-def test_importing_handler_creates_no_aws_client():
+def test_importing_the_module_creates_no_aws_client():
     api_folder = Path(__file__).resolve().parent.parent
     code = (
         "import boto3\n"
@@ -145,7 +137,7 @@ def test_importing_handler_creates_no_aws_client():
         "    raise AssertionError('an AWS client was created at import time')\n"
         "boto3.client = fail\n"
         "boto3.resource = fail\n"
-        "import handler\n"
+        "import capture_lambda\n"
     )
 
     result = subprocess.run(
@@ -168,11 +160,11 @@ def test_missing_variable_returns_generic_500_and_logs_only_the_name(
 ):
     set_env(monkeypatch, **{missing: None})
 
-    response = handler.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(health_event(), None)
 
     assert_generic_500(response)
     assert missing in caplog.text
-    for value in (BUCKET, QUEUE_URL, TABLE):
+    for value in (QUEUE_URL, TABLE):
         assert value not in caplog.text
         assert value not in response["body"]
     assert factory.requested == []
@@ -182,14 +174,14 @@ def test_missing_variable_returns_generic_500_and_logs_only_the_name(
 def test_blank_variable_counts_as_missing(monkeypatch, factory, caplog, blank):
     set_env(monkeypatch, CAPTURE_QUEUE_URL=blank)
 
-    response = handler.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(health_event(), None)
 
     assert_generic_500(response)
     assert "CAPTURE_QUEUE_URL" in caplog.text
 
 
 def test_all_missing_variables_are_listed(monkeypatch, factory, caplog):
-    response = handler.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(health_event(), None)
 
     assert_generic_500(response)
     for name in FULL_ENV:
@@ -197,11 +189,11 @@ def test_all_missing_variables_are_listed(monkeypatch, factory, caplog):
 
 
 def test_failed_configuration_is_not_cached(monkeypatch, factory):
-    assert handler.lambda_handler(health_event(), None)["statusCode"] == 500
+    assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 500
 
     set_env(monkeypatch)
 
-    assert handler.lambda_handler(health_event(), None)["statusCode"] == 200
+    assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 200
 
 
 def test_failure_while_creating_clients_is_generic_and_leaks_nothing(
@@ -212,9 +204,9 @@ def test_failure_while_creating_clients_is_generic_and_leaks_nothing(
     def broken_factory(service_name):
         raise RuntimeError(SECRET_TEXT)
 
-    monkeypatch.setattr(handler, "_client_factory", broken_factory)
+    monkeypatch.setattr(capture_lambda, "_client_factory", broken_factory)
 
-    response = handler.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(health_event(), None)
 
     assert_generic_500(response)
     assert "RuntimeError" in caplog.text
@@ -225,10 +217,10 @@ def test_failure_while_creating_clients_is_generic_and_leaks_nothing(
 # ---------- wiring ----------
 
 
-def test_build_service_requests_the_three_clients(monkeypatch, factory):
-    service = handler.build_service(FULL_ENV, factory)
+def test_build_service_requests_the_two_clients(monkeypatch, factory):
+    service = capture_lambda.build_service(FULL_ENV, factory)
 
-    assert sorted(factory.requested) == ["dynamodb", "s3", "sqs"]
+    assert sorted(factory.requested) == ["dynamodb", "sqs"]
     assert service is not None
 
 
@@ -236,15 +228,15 @@ def test_service_is_built_once_and_reused(monkeypatch, factory):
     set_env(monkeypatch)
 
     for _ in range(3):
-        assert handler.lambda_handler(health_event(), None)["statusCode"] == 200
+        assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 200
 
-    assert sorted(factory.requested) == ["dynamodb", "s3", "sqs"]
+    assert sorted(factory.requested) == ["dynamodb", "sqs"]
 
 
 def test_health_works_through_lambda_handler(monkeypatch, factory):
     set_env(monkeypatch)
 
-    response = handler.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(health_event(), None)
 
     assert response["statusCode"] == 200
     assert json.loads(response["body"]) == {"status": "healthy"}
@@ -253,7 +245,7 @@ def test_health_works_through_lambda_handler(monkeypatch, factory):
 def test_submission_uses_the_configured_resource_names(monkeypatch, factory):
     set_env(monkeypatch)
 
-    response = handler.lambda_handler(submit_event(sub="real-player"), None)
+    response = capture_lambda.lambda_handler(submit_event(sub="real-player"), None)
 
     body = json.loads(response["body"])
     assert response["statusCode"] == 202
@@ -262,22 +254,22 @@ def test_submission_uses_the_configured_resource_names(monkeypatch, factory):
     dynamo = factory.clients["dynamodb"]
     assert {kwargs["TableName"] for _, kwargs in dynamo.calls} == {TABLE}
 
-    [s3_call] = factory.clients["s3"].calls
-    assert s3_call["Bucket"] == BUCKET
-
     [sqs_call] = factory.clients["sqs"].calls
     assert sqs_call["QueueUrl"] == QUEUE_URL
     message = json.loads(sqs_call["MessageBody"])
     assert message["playerId"] == "real-player"
-    assert message["routeObject"]["bucket"] == BUCKET
     assert message["captureId"] == body["captureId"]
+    assert message["route"]["encoding"] == "gzip+base64"
+    route = unpack_route(RoutePayload(**message["route"]))["route"]
+    assert len(route) == 4
+    assert route[0]["latitude"] == 34.7025
 
 
 def test_the_event_is_never_logged(monkeypatch, factory, caplog):
     set_env(monkeypatch)
     caplog.set_level(logging.DEBUG)
 
-    handler.lambda_handler(submit_event(sub="very-private-subject"), None)
+    capture_lambda.lambda_handler(submit_event(sub="very-private-subject"), None)
 
     assert "34.7025" not in caplog.text
     assert "135.4959" not in caplog.text

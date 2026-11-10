@@ -90,7 +90,7 @@ class CaptureService:
     ) -> SubmitResult:
         """Accept a validated route for processing.
 
-        Order: record (RECEIVED) -> store route -> send to queue -> PENDING.
+        Order: record (RECEIVED) -> prepare route -> send to queue -> PENDING.
         It only reports success after the queue accepted the message. If any
         step fails, the client retries with the same key and the steps are
         simply repeated. Every step is safe to repeat, and the worker must
@@ -104,8 +104,8 @@ class CaptureService:
             if record.status != RECEIVED:
                 return SubmitResult(capture_id, record.status, already_accepted=True)
 
-            route_object = self._route_store.put(player_id, capture_id, samples)
-            self._queue.send(CaptureMessage(capture_id, player_id, route_object))
+            route_payload = self._route_store.put(player_id, capture_id, samples)
+            self._queue.send(CaptureMessage(capture_id, player_id, route_payload))
             self._repository.mark_pending(player_id, capture_id, self._clock())
         except (StorageUnavailableError, QueueUnavailableError) as error:
             raise _unavailable(

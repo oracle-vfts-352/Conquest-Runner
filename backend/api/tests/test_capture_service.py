@@ -93,16 +93,13 @@ def test_first_submit_is_accepted_and_queued(service, repository, route_store, q
     assert len(queue.messages) == 1
 
 
-def test_queue_message_has_identity_from_the_caller_and_no_gps_data(service, queue):
+def test_queue_message_has_the_callers_identity_and_the_prepared_route(service, queue):
     result = service.submit(PLAYER, KEY, make_samples())
 
     message = queue.messages[0]
     assert message.capture_id == result.capture_id
     assert message.player_id == PLAYER
-    assert message.route_object.key == (
-        f"captures/{PLAYER}/{result.capture_id}/route.json"
-    )
-    assert not hasattr(message, "samples")
+    assert message.route.data == f"{PLAYER}/{result.capture_id}"
 
 
 # ---------- submit: retries and idempotency ----------

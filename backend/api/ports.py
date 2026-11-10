@@ -1,10 +1,11 @@
 """Interfaces (ports) that the capture service depends on.
 
-The real implementations (DynamoDB, S3, SQS) are written later. Tests use the
+The real implementations (DynamoDB, SQS) are in their own modules. Tests use the
 in-memory fakes in tests/fakes.py, so no AWS account is needed.
 
-The message format and the S3 claim-check design follow the PROPOSAL in
-docs/API_CONTRACT.md section 4.3. It is not a final team decision yet.
+Technical lead's decision for the MVP: the route travels inside the SQS message,
+compressed with gzip and encoded with base64 (see inline_route_store.py). The
+RouteStore interface is kept so another way (for example S3) can be added later.
 """
 
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ SCHEMA_VERSION = 1
 
 
 class StorageUnavailableError(Exception):
-    """The database or the route store could not be used."""
+    """The database (or another store) could not be used."""
 
 
 class QueueUnavailableError(Exception):
@@ -35,11 +36,11 @@ class QueueUnavailableError(Exception):
 
 
 @dataclass(frozen=True)
-class RouteObject:
-    """Where the full route is stored (the 'claim check')."""
+class RoutePayload:
+    """The route as it is put into the queue message."""
 
-    bucket: str
-    key: str
+    encoding: str  # how `data` was produced, for example "gzip+base64"
+    data: str
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,11 @@ class CaptureRecord:
 
 @dataclass(frozen=True)
 class CaptureMessage:
-    """The small message sent to the worker. It holds no GPS data."""
+    """The message sent to the worker. The route is inside it, compressed."""
 
     capture_id: str
     player_id: str  # always from the verified token, never from the request body
-    route_object: RouteObject
+    route: RoutePayload
     schema_version: int = SCHEMA_VERSION
 
 
@@ -82,9 +83,9 @@ class CaptureRepository(Protocol):
 class RouteStore(Protocol):
     def put(
         self, player_id: str, capture_id: str, samples: list[GpsSample]
-    ) -> RouteObject:
-        """Store the route. The same input must always give the same RouteObject
-        (saving again just overwrites), so a retry is safe."""
+    ) -> RoutePayload:
+        """Prepare the route for the worker. The same input must always give the
+        same RoutePayload, so a retry is safe."""
 
 
 class CaptureQueue(Protocol):

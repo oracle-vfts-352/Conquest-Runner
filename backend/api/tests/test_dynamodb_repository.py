@@ -12,7 +12,7 @@ from ports import (
     RECEIVED,
     SUCCEEDED,
     CaptureRecord,
-    RouteObject,
+    RoutePayload,
     StorageUnavailableError,
 )
 
@@ -305,9 +305,7 @@ def test_mark_pending_failure_does_not_leak_aws_details():
 
 class FakeRouteStore:
     def put(self, player_id, capture_id, samples):
-        return RouteObject(
-            bucket="fake-bucket", key=f"captures/{player_id}/{capture_id}"
-        )
+        return RoutePayload(encoding="fake", data=f"{player_id}/{capture_id}")
 
 
 class FakeQueue:

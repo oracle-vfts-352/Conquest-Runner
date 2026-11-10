@@ -14,7 +14,7 @@ from ports import (
     CaptureMessage,
     CaptureRecord,
     QueueUnavailableError,
-    RouteObject,
+    RoutePayload,
     StorageUnavailableError,
 )
 
@@ -61,13 +61,13 @@ class FakeRouteStore:
 
     def put(
         self, player_id: str, capture_id: str, samples: list[GpsSample]
-    ) -> RouteObject:
+    ) -> RoutePayload:
         if self.fail:
             raise StorageUnavailableError("fake route store failure")
         self.put_count += 1
-        key = f"captures/{player_id}/{capture_id}/route.json"
-        self.stored[key] = samples
-        return RouteObject(bucket="fake-bucket", key=key)
+        reference = f"{player_id}/{capture_id}"
+        self.stored[reference] = samples
+        return RoutePayload(encoding="fake", data=reference)
 
 
 class FakeCaptureQueue:
