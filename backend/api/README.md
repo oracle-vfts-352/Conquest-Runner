@@ -5,7 +5,7 @@ authenticated players, validates the request structure, and starts asynchronous
 capture processing. It does **not** calculate territory: that is the worker's job
 (`backend/worker/`).
 
-> **Status: work in progress.** The code below is tested locally with fakes.
+> **Status: work in progress.** The code below is complete for local use and tested with fakes.
 > Nothing here has been deployed or verified against real AWS resources.
 > Do **not** treat any endpoint as secured in production until the
 > infrastructure and the Cognito authorizer are configured and tested.
@@ -57,11 +57,25 @@ Client ──POST──> API Gateway (JWT authorizer) ──> http_api.handle_re
 | `ports.py` | Interfaces the service depends on (repository, route store, queue) and shared types |
 | `s3_route_store.py` | Saves the route to S3 (the "claim check") |
 | `sqs_queue.py` | Sends the job message to SQS |
+| `dynamodb_repository.py` | Stores capture records in DynamoDB (table design is a proposal, see [`docs/DATA_MODEL.md`](../../docs/DATA_MODEL.md)) |
+| `handler.py` | The Lambda entry point: reads the environment variables, creates the AWS clients on the first request, and calls `http_api.handle_request` |
 | `errors.py` | Error codes and `ApiError` |
 | `models.py`, `config.py` | `GpsSample` type; limits |
 | `tests/` | Unit tests. `tests/fakes.py` holds in-memory test fakes |
 
-`handler.py` (the Lambda entry point) is **not wired yet**.
+## Environment variables
+
+`handler.py` reads these three variables. The **names are proposed** and not yet agreed with the
+technical lead, so `infrastructure/template.yaml` must match whatever is decided.
+
+| Variable | Used for |
+|---|---|
+| `ROUTE_BUCKET_NAME` | S3 bucket that holds the stored routes |
+| `CAPTURE_QUEUE_URL` | SQS queue that receives the capture jobs |
+| `CAPTURES_TABLE_NAME` | DynamoDB table that holds the capture records |
+
+If one is missing, the API returns a generic `500` and logs only the variable **name**.
+Importing `handler.py` never contacts AWS; clients are created on the first request.
 
 ## Run the tests locally
 
@@ -91,7 +105,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Expected result: all tests pass (currently 155).
+Expected result: all tests pass (currently 189).
 
 Lint and format checks (run from `backend/api`, not from the repository root):
 
@@ -122,12 +136,11 @@ adds test and lint tools. The API has no `package.json`.
 These items are open. Items marked *proposed* are not in the contract yet and need
 a team decision.
 
-**Missing code**
-- `handler.py` is empty: no Lambda entry point, no creation of real AWS clients.
-- No DynamoDB repository (`CaptureRepository`). `docs/DATA_MODEL.md` is empty, so
-  the table design is undecided.
-- Resource names (bucket, queue URL, table) will come from environment variables.
-  The names are not decided and nothing reads them yet.
+**Never run on real AWS**
+- Everything is tested only with fakes. The handler, the three adapters and the
+  DynamoDB conditions have not been run against real resources or with `sam local`.
+- The DynamoDB table design in `docs/DATA_MODEL.md` is a draft proposal, not approved.
+- The environment variable names above are proposed, not agreed.
 
 **Design decisions waiting for the technical lead**
 - **S3 claim-check or compression.** 10,000 samples is about 1 MB of JSON, but one
