@@ -14,7 +14,8 @@ capture processing. It does **not** calculate territory: that is the worker's jo
 Related documents:
 [`docs/API_CONTRACT.md`](../../docs/API_CONTRACT.md) (the contract),
 [`docs/API_CONTRACT_CHANGES.md`](../../docs/API_CONTRACT_CHANGES.md) (proposed changes and shapes),
-[`docs/DATA_MODEL.md`](../../docs/DATA_MODEL.md) (draft DynamoDB design).
+[`docs/DATA_MODEL.md`](../../docs/DATA_MODEL.md) (the lead's data model),
+[`docs/CAPTURE_RECORD_PROPOSAL.md`](../../docs/CAPTURE_RECORD_PROPOSAL.md) (the capture item this API uses, and how it differs).
 
 ## Endpoints implemented
 
@@ -59,7 +60,7 @@ Client ──POST──> API Gateway (JWT authorizer) ──> http_api.handle_re
 | `ports.py` | Interfaces the service depends on (repository, route store, queue) and shared types |
 | `inline_route_store.py` | Packs the route as gzip + base64 for the queue message |
 | `sqs_queue.py` | Builds the message, checks its size, sends it to SQS |
-| `dynamodb_repository.py` | Stores capture records in DynamoDB (draft design in `docs/DATA_MODEL.md`) |
+| `dynamodb_repository.py` | Stores capture records in DynamoDB (draft design in `docs/CAPTURE_RECORD_PROPOSAL.md`) |
 | `capture_lambda.py` | Wires everything for Lambda: reads the environment variables, creates AWS clients on the first request, calls `http_api.handle_request` |
 | `errors.py` | Error codes and `ApiError` |
 | `models.py`, `config.py` | `GpsSample` type; limits |
@@ -148,7 +149,7 @@ all of them are listed with their reasons in `docs/API_CONTRACT_CHANGES.md`.
 **Waiting for the technical lead**
 - Integration of `handler.py` and `infrastructure/template.yaml` (both untouched here).
 - The SQS queue must allow messages of 1 MiB (`MaximumMessageSize`); older queues may be set to 256 KiB.
-- The shapes of the worker's `result` / `error` and the status transitions in `docs/DATA_MODEL.md`.
+- The shapes of the worker's `result` / `error`, and the status transitions in `docs/CAPTURE_RECORD_PROPOSAL.md`.
 
 **Not included**
 - Player stats, capture history and leaderboard endpoints.

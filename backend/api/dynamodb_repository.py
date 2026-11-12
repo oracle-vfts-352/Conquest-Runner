@@ -1,21 +1,25 @@
 """Stores capture records in Amazon DynamoDB.
 
-THE TABLE DESIGN BELOW IS A PROPOSAL. docs/DATA_MODEL.md is empty and the
-technical lead has not approved it. If it changes, only this file changes.
+THE TABLE DESIGN BELOW IS A PROPOSAL. It starts from the key layout for capture
+metadata in docs/DATA_MODEL.md section 3 (the lead's draft) and is explained in
+docs/CAPTURE_RECORD_PROPOSAL.md. If the schema changes, only this file changes.
 
-One item per capture:
+One item per capture (capture metadata):
 
-    pk          "PLAYER#<playerId>"          (partition key)
-    sk          "CAPTURE#<captureId>"        (sort key)
+    PK          "CAPTURE#<captureId>"        (partition key)
+    SK          "META"                       (sort key)
     captureId, playerId, requestHash         strings
     status      RECEIVED | PENDING | PROCESSING | SUCCEEDED | REJECTED | FAILED
     createdAt, updatedAt                     ISO 8601 UTC strings, e.g. 2026-10-23T01:00:00Z
     result      map   (written by the worker when SUCCEEDED)
     error       map   (written by the worker when REJECTED or FAILED)
 
-The record never contains GPS data; the route lives in the route store.
-Because the player ID is part of the key, a player can only ever read items
-under their own partition. Retention (a TTL attribute) is not decided yet.
+The record never contains GPS data; the route travels in the queue message.
+The key has no player ID, so every read checks that `playerId` is the caller:
+a capture that belongs to someone else is treated as not found.
+The capture ID is derived from the player and the Idempotency-Key, so this one
+item also does the job of the separate idempotency record in DATA_MODEL.md.
+Retention (a TTL attribute) is not decided yet.
 
 The DynamoDB client is passed in, so tests can use a fake without AWS.
 """
@@ -33,10 +37,10 @@ _CONDITION_FAILED = "ConditionalCheckFailedException"
 _deserializer = TypeDeserializer()
 
 
-def _key(player_id: str, capture_id: str) -> dict:
+def _key(capture_id: str) -> dict:
     return {
-        "pk": {"S": f"PLAYER#{player_id}"},
-        "sk": {"S": f"CAPTURE#{capture_id}"},
+        "PK": {"S": f"CAPTURE#{capture_id}"},
+        "SK": {"S": "META"},
     }
 
 
@@ -104,18 +108,22 @@ class DynamoDbCaptureRepository:
             # A consistent read, so a retry always sees the record it just created.
             response = self._client.get_item(
                 TableName=self._table_name,
-                Key=_key(player_id, capture_id),
+                Key=_key(capture_id),
                 ConsistentRead=True,
             )
         except (BotoCoreError, ClientError) as error:
             raise StorageUnavailableError("The database is unavailable.") from error
 
         item = response.get("Item")
-        return None if item is None else _record_from_item(item)
+        if item is None:
+            return None
+        record = _record_from_item(item)
+        # The key does not contain the player, so ownership is checked here.
+        return record if record.player_id == player_id else None
 
     def create(self, record: CaptureRecord) -> bool:
         item = {
-            **_key(record.player_id, record.capture_id),
+            **_key(record.capture_id),
             "captureId": {"S": record.capture_id},
             "playerId": {"S": record.player_id},
             "requestHash": {"S": record.request_hash},
@@ -127,7 +135,7 @@ class DynamoDbCaptureRepository:
             self._client.put_item(
                 TableName=self._table_name,
                 Item=item,
-                ConditionExpression="attribute_not_exists(pk)",
+                ConditionExpression="attribute_not_exists(PK)",
             )
         except ClientError as error:
             if _is_condition_failure(error):
@@ -143,7 +151,7 @@ class DynamoDbCaptureRepository:
             # capture on, the condition fails and its progress is kept.
             self._client.update_item(
                 TableName=self._table_name,
-                Key=_key(player_id, capture_id),
+                Key=_key(capture_id),
                 UpdateExpression="SET #s = :pending, updatedAt = :now",
                 ConditionExpression="#s = :received",
                 ExpressionAttributeNames={"#s": "status"},

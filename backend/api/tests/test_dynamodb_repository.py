@@ -68,7 +68,7 @@ class FakeDynamoClient:
 
     @staticmethod
     def _id(key):
-        return (key["pk"]["S"], key["sk"]["S"])
+        return (key["PK"]["S"], key["SK"]["S"])
 
     def get_item(self, **kwargs):
         self.calls.append(("get_item", kwargs))
@@ -79,7 +79,7 @@ class FakeDynamoClient:
     def put_item(self, **kwargs):
         self.calls.append(("put_item", kwargs))
         self._fail_if_needed()
-        assert kwargs["ConditionExpression"] == "attribute_not_exists(pk)"
+        assert kwargs["ConditionExpression"] == "attribute_not_exists(PK)"
         key = self._id(kwargs["Item"])
         if key in self.items:
             raise condition_failed("PutItem")
@@ -117,10 +117,10 @@ def test_create_stores_the_expected_item(repository, client):
     method, kwargs = client.calls[0]
     assert method == "put_item"
     assert kwargs["TableName"] == TABLE
-    assert kwargs["ConditionExpression"] == "attribute_not_exists(pk)"
+    assert kwargs["ConditionExpression"] == "attribute_not_exists(PK)"
     assert kwargs["Item"] == {
-        "pk": {"S": f"PLAYER#{PLAYER}"},
-        "sk": {"S": f"CAPTURE#{CAPTURE}"},
+        "PK": {"S": f"CAPTURE#{CAPTURE}"},
+        "SK": {"S": "META"},
         "captureId": {"S": CAPTURE},
         "playerId": {"S": PLAYER},
         "requestHash": {"S": "hash-1"},
@@ -134,7 +134,7 @@ def test_create_returns_false_when_the_record_already_exists(repository, client)
     repository.create(make_record())
 
     assert repository.create(make_record(request_hash="other")) is False
-    stored = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{CAPTURE}")]
+    stored = client.items[(f"CAPTURE#{CAPTURE}", "META")]
     assert stored["requestHash"] == {"S": "hash-1"}
 
 
@@ -174,8 +174,8 @@ def test_get_returns_the_record_using_a_consistent_read(repository, client):
     assert method == "get_item"
     assert kwargs["ConsistentRead"] is True
     assert kwargs["Key"] == {
-        "pk": {"S": f"PLAYER#{PLAYER}"},
-        "sk": {"S": f"CAPTURE#{CAPTURE}"},
+        "PK": {"S": f"CAPTURE#{CAPTURE}"},
+        "SK": {"S": "META"},
     }
 
 
@@ -191,7 +191,7 @@ def test_another_players_record_is_not_found(repository):
 
 def test_get_converts_database_numbers_so_they_can_be_sent_as_json(repository, client):
     repository.create(make_record())
-    item = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{CAPTURE}")]
+    item = client.items[(f"CAPTURE#{CAPTURE}", "META")]
     item["status"] = {"S": SUCCEEDED}
     item["result"] = {
         "M": {
@@ -208,7 +208,7 @@ def test_get_converts_database_numbers_so_they_can_be_sent_as_json(repository, c
 
 def test_get_reads_the_error_map_written_by_the_worker(repository, client):
     repository.create(make_record())
-    item = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{CAPTURE}")]
+    item = client.items[(f"CAPTURE#{CAPTURE}", "META")]
     item["status"] = {"S": "REJECTED"}
     item["error"] = {
         "M": {"code": {"S": "LOOP_NOT_CLOSED"}, "message": {"S": "Not a closed loop."}}
@@ -231,7 +231,7 @@ def test_get_reads_the_error_map_written_by_the_worker(repository, client):
 )
 def test_damaged_item_becomes_storage_unavailable(repository, client, damage):
     repository.create(make_record())
-    item = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{CAPTURE}")]
+    item = client.items[(f"CAPTURE#{CAPTURE}", "META")]
     for name, value in damage.items():
         if value is None:
             del item[name]
@@ -269,7 +269,7 @@ def test_mark_pending_changes_received_to_pending(repository):
 
 def test_mark_pending_keeps_progress_made_by_the_worker(repository, client):
     repository.create(make_record())
-    item = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{CAPTURE}")]
+    item = client.items[(f"CAPTURE#{CAPTURE}", "META")]
     item["status"] = {"S": "PROCESSING"}
 
     repository.mark_pending(PLAYER, CAPTURE, START + timedelta(seconds=3))
@@ -342,7 +342,7 @@ def test_service_with_the_dynamodb_repository_submit_retry_and_status(client):
     assert first.capture_id == derive_capture_id(PLAYER, "key-0001-abcdef")
 
     # The worker finishes the capture by writing to the same item.
-    item = client.items[(f"PLAYER#{PLAYER}", f"CAPTURE#{first.capture_id}")]
+    item = client.items[(f"CAPTURE#{first.capture_id}", "META")]
     item["status"] = {"S": SUCCEEDED}
     item["result"] = {"M": {"capturedAreaM2": {"N": "1250.5"}}}
 

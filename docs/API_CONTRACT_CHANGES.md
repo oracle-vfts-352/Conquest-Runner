@@ -13,7 +13,7 @@
 | Queue payload: gzip + base64 for the MVP, no S3 | `inline_route_store.py`, `sqs_queue.py`. The S3 adapter was removed from the branch (still in git history). `RouteStore` is kept as an interface so S3 can be added later |
 | Hard size check after compression | `serialize_message` rejects a message over `MAX_MESSAGE_BYTES` (1 MiB) with `413`; `InlineRouteStore` rejects a payload over that limit minus 2 KiB |
 | Test for the maximum-size route | `tests/test_inline_route_store.py` (10,000 realistic points and 10,000 random "worst case" points) |
-| Worker idempotency by `captureId` | Documented in `docs/DATA_MODEL.md` with conditional status transitions |
+| Worker idempotency by `captureId` | Documented in `docs/CAPTURE_RECORD_PROPOSAL.md` with conditional status transitions |
 | Keep `handler.py` and `template.yaml` untouched | Both untouched. The wiring is in a separate module, `capture_lambda.py`; `handler.py` can call `lambda_handler` from it |
 
 **Measured sizes** (10,000 samples, after gzip + base64):
@@ -110,7 +110,16 @@ contract change; the code needs only a one-line change in `errors.py` and its te
 
 ## 7. Open points for the worker owner
 
-1. Format of `result` and `error` written to the table (see `docs/DATA_MODEL.md`).
-2. Conditional status transitions and the `RECEIVED` / `PENDING` race (see `docs/DATA_MODEL.md`).
+1. Format of `result` and `error` written to the table (see `docs/CAPTURE_RECORD_PROPOSAL.md`).
+2. Conditional status transitions and the `RECEIVED` / `PENDING` race (see `docs/CAPTURE_RECORD_PROPOSAL.md`).
 3. Reading the compressed route: base64 decode, then gunzip, then JSON (`unpack_route` in
    `inline_route_store.py` is a reference).
+
+## 8. Housekeeping (not changed in this PR)
+
+On `main`, `docs/API_CONTRACT.md` and `docs/DATA_MODEL.md` both begin with a line `@'` and end with
+`'@ | Set-Content -Path ... -Encoding utf8` and `Write-Host "... created."`. These are leftovers of a
+PowerShell script that wrote the files and are not part of the documents. They are harmless but
+should be removed by the owner. `docs/DATA_MODEL.md` also still describes route chunks stored in
+DynamoDB (section 6); the lead's gzip + base64 decision replaces that (see
+`docs/CAPTURE_RECORD_PROPOSAL.md`, section 2a).

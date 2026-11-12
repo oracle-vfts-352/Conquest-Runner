@@ -30,14 +30,14 @@ class FakeDynamo:
 
     def get_item(self, **kwargs):
         self.calls.append(("get_item", kwargs))
-        key = (kwargs["Key"]["pk"]["S"], kwargs["Key"]["sk"]["S"])
+        key = (kwargs["Key"]["PK"]["S"], kwargs["Key"]["SK"]["S"])
         item = self.items.get(key)
         return {"Item": item} if item is not None else {}
 
     def put_item(self, **kwargs):
         self.calls.append(("put_item", kwargs))
         item = kwargs["Item"]
-        self.items[(item["pk"]["S"], item["sk"]["S"])] = item
+        self.items[(item["PK"]["S"], item["SK"]["S"])] = item
 
     def update_item(self, **kwargs):
         self.calls.append(("update_item", kwargs))
