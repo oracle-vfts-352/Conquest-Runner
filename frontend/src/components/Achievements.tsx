@@ -281,13 +281,15 @@ const target =
                       PROGRESS
                     </span>
 
+                    
                     <span className="text-xs font-bold">
-                      Math.min(progress, target)
+                      {Math.min(progress, target).toLocaleString()}
                       {" / "}
-                      target.toLocaleString()
+                      {target.toLocaleString()}
                       {" "}
                       {achievement.unit}
                     </span>
+
                   </div>
 
                   <div
