@@ -1,7 +1,9 @@
-import type {
+﻿import type {
   GpsSample,
   RecordedRoute,
 } from './gpsTypes'
+
+export const MINIMUM_ROUTE_SAMPLE_COUNT = 4
 
 export type CaptureRouteSample = {
   latitude: number
@@ -26,17 +28,19 @@ export class IncompleteRouteError extends Error {
   }
 }
 
-export class EmptyRouteError extends Error {
+export class InsufficientRouteSamplesError extends Error {
   constructor() {
-    super('GPSサンプルがないルートは送信できません。')
-    this.name = 'EmptyRouteError'
+    super(
+      `ルート送信には最低${MINIMUM_ROUTE_SAMPLE_COUNT}件のGPSサンプルが必要です。`,
+    )
+    this.name = 'InsufficientRouteSamplesError'
   }
 }
 
 export class InvalidRouteTimestampError extends Error {
   constructor() {
     super(
-      'GPSサンプルのタイムスタンプは厳密な昇順である必要があります。',
+      'GPSサンプルのタイムスタンプは有効かつ厳密な昇順である必要があります。',
     )
     this.name = 'InvalidRouteTimestampError'
   }
@@ -50,15 +54,26 @@ function hasStrictlyIncreasingTimestamps(
     index < samples.length;
     index += 1
   ) {
+    const previousSample = samples[index - 1]
+    const currentSample = samples[index]
+
     if (
-      samples[index].timestampMs <=
-      samples[index - 1].timestampMs
+      currentSample.timestampMs <=
+      previousSample.timestampMs
     ) {
       return false
     }
   }
 
   return true
+}
+
+function hasValidTimestamps(
+  samples: GpsSample[],
+): boolean {
+  return samples.every((sample) =>
+    Number.isFinite(sample.timestampMs),
+  )
 }
 
 export function prepareRouteSubmission(
@@ -68,11 +83,17 @@ export function prepareRouteSubmission(
     throw new IncompleteRouteError()
   }
 
-  if (route.samples.length === 0) {
-    throw new EmptyRouteError()
+  if (
+    route.samples.length <
+    MINIMUM_ROUTE_SAMPLE_COUNT
+  ) {
+    throw new InsufficientRouteSamplesError()
   }
 
-  if (!hasStrictlyIncreasingTimestamps(route.samples)) {
+  if (
+    !hasValidTimestamps(route.samples) ||
+    !hasStrictlyIncreasingTimestamps(route.samples)
+  ) {
     throw new InvalidRouteTimestampError()
   }
 
