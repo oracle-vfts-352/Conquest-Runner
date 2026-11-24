@@ -1,10 +1,11 @@
 # Proposed changes to `API_CONTRACT.md`
 
-> **DRAFT for review by the technical lead.** This file does not replace `docs/API_CONTRACT.md`.
-> It lists what the implementation in `backend/api/` does where the contract is silent,
-> inconsistent, or changed by the lead's latest decisions. Accept, change or reject each item;
-> then the contract and the code can be updated together.
-> Section numbers refer to the latest contract version the lead shared.
+> **Companion to `docs/API_CONTRACT.md`.** The lead confirmed the MVP decisions (payload,
+> idempotency header, excluded GPS fields, status codes, gzip + base64) and asked for the contract
+> to be updated. Those decisions are now in `docs/API_CONTRACT.md` (sections 4 and 10.1).
+> This file keeps the details that do not belong in the contract: what the code does where the
+> contract is silent, the measured sizes, and what the infrastructure must provide.
+> Items still marked *proposed* or *open* need a decision.
 
 ## 1. Decisions from the lead (now implemented)
 
@@ -22,7 +23,7 @@ Both fit in 1 MiB; the worst case does **not** fit in the old 256 KiB limit. A q
 August 2025 may still be set to 256 KiB, so the queue's `MaximumMessageSize` must be set to
 1 MiB (1048576) in the infrastructure.
 
-## 2. Changes to the contract text
+## 2. Changes made to the contract text (applied in this PR)
 
 | Contract part | Proposed change |
 |---|---|
@@ -117,9 +118,13 @@ contract change; the code needs only a one-line change in `errors.py` and its te
 
 ## 8. Housekeeping (not changed in this PR)
 
-On `main`, `docs/API_CONTRACT.md` and `docs/DATA_MODEL.md` both begin with a line `@'` and end with
-`'@ | Set-Content -Path ... -Encoding utf8` and `Write-Host "... created."`. These are leftovers of a
-PowerShell script that wrote the files and are not part of the documents. They are harmless but
-should be removed by the owner. `docs/DATA_MODEL.md` also still describes route chunks stored in
-DynamoDB (section 6); the lead's gzip + base64 decision replaces that (see
+**`docs/API_CONTRACT.md` base version.** `main` has an older text of the contract (it starts with a
+leftover PowerShell line `@'`, ends with `'@ | Set-Content ...` and `Write-Host ...`, and has no
+section 4.3 or 7.1). This PR updates the **2026-11-06 version that the lead shared** (the one with
+sections 4.3 and 7.1) with the confirmed decisions, so the diff against `main` is large. Please
+confirm that this is the intended base.
+
+**`docs/DATA_MODEL.md`** is untouched. It also begins with `@'` and ends with `'@ | Set-Content ...`
+and `Write-Host ...` lines, which are harmless leftovers the owner may want to remove, and it still
+describes route chunks stored in DynamoDB (section 6); the gzip + base64 decision replaces that (see
 `docs/CAPTURE_RECORD_PROPOSAL.md`, section 2a).
