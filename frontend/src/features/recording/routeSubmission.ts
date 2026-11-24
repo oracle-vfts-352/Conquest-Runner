@@ -1,63 +1,92 @@
-import type { RecordedRoute } from './gpsTypes'
-import { createRouteSummary } from './routeMetrics'
+import type {
+  GpsSample,
+  RecordedRoute,
+} from './gpsTypes'
 
-export type RouteSubmissionSampleV1 = {
+export type CaptureRouteSample = {
   latitude: number
   longitude: number
-  accuracyMeters: number
   timestamp: string
-  altitudeMeters?: number | null
-  altitudeAccuracyMeters?: number | null
-  headingDegrees?: number | null
-  speedMetersPerSecond?: number | null
+  accuracyMeters: number
 }
 
-export type RouteSubmissionPayloadV1 = {
-  schemaVersion: 1
-  clientRouteId: string
-  startedAt: string
-  endedAt: string
-  samples: RouteSubmissionSampleV1[]
-  clientSummary: {
-    elapsedMs: number
-    distanceMeters: number
-  }
+export type CaptureRouteRequestBody = {
+  route: CaptureRouteSample[]
+}
+
+export type PreparedRouteSubmission = {
+  body: CaptureRouteRequestBody
+  idempotencyKey: string
 }
 
 export class IncompleteRouteError extends Error {
   constructor() {
-    super('停止されていないルートは送信用データに変換できません。')
+    super('停止されていないルートは送信できません。')
     this.name = 'IncompleteRouteError'
   }
 }
 
-export function createRouteSubmissionPayload(
+export class EmptyRouteError extends Error {
+  constructor() {
+    super('GPSサンプルがないルートは送信できません。')
+    this.name = 'EmptyRouteError'
+  }
+}
+
+export class InvalidRouteTimestampError extends Error {
+  constructor() {
+    super(
+      'GPSサンプルのタイムスタンプは厳密な昇順である必要があります。',
+    )
+    this.name = 'InvalidRouteTimestampError'
+  }
+}
+
+function hasStrictlyIncreasingTimestamps(
+  samples: GpsSample[],
+): boolean {
+  for (
+    let index = 1;
+    index < samples.length;
+    index += 1
+  ) {
+    if (
+      samples[index].timestampMs <=
+      samples[index - 1].timestampMs
+    ) {
+      return false
+    }
+  }
+
+  return true
+}
+
+export function prepareRouteSubmission(
   route: RecordedRoute,
-): RouteSubmissionPayloadV1 {
+): PreparedRouteSubmission {
   if (route.endedAtMs === null) {
     throw new IncompleteRouteError()
   }
 
-  const summary = createRouteSummary(route)
+  if (route.samples.length === 0) {
+    throw new EmptyRouteError()
+  }
+
+  if (!hasStrictlyIncreasingTimestamps(route.samples)) {
+    throw new InvalidRouteTimestampError()
+  }
 
   return {
-    schemaVersion: 1,
-    clientRouteId: route.id,
-    startedAt: new Date(route.startedAtMs).toISOString(),
-    endedAt: new Date(route.endedAtMs).toISOString(),
-    samples: route.samples.map((sample) => ({
-      latitude: sample.latitude,
-      longitude: sample.longitude,
-      accuracyMeters: sample.accuracyMeters,
-      timestamp: new Date(sample.timestampMs).toISOString(),
-      altitudeMeters: sample.altitudeMeters,
-      altitudeAccuracyMeters: sample.altitudeAccuracyMeters,
-      headingDegrees: sample.headingDegrees,
-      speedMetersPerSecond: sample.speedMetersPerSecond,
-    })),
-    clientSummary: {
-      elapsedMs: summary.elapsedMs,
-      distanceMeters: summary.distanceMeters,
+    idempotencyKey: route.id,
+    body: {
+      route: route.samples.map((sample) => ({
+        latitude: sample.latitude,
+        longitude: sample.longitude,
+        timestamp: new Date(
+          sample.timestampMs,
+        ).toISOString(),
+        accuracyMeters: sample.accuracyMeters,
+      })),
     },
   }
 }
