@@ -23,7 +23,8 @@ Related documents:
 |---|---|---|
 | `POST` | `/api/v1/captures` | Validate a route and queue it for processing |
 | `GET` | `/api/v1/captures/{captureId}` | Return the status of the caller's own capture |
-| `GET` | `/api/v1/health` | Return `{"status": "healthy"}` |
+| `GET` | `/api/v1/health` | Alive check. Returns `{"status": "healthy"}` without building the service, so it works even if the configuration is missing |
+| `GET` | `/api/v1/ready` | Readiness check. `200 {"status": "ready"}` when the configuration is complete, otherwise `503` |
 
 ## How a submission flows
 

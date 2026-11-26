@@ -43,6 +43,7 @@ This is the contract for implementation. Sections marked **Decided** were confir
 | `POST` | `/api/v1/captures` | Submit a route for capture processing | Required |
 | `GET` | `/api/v1/captures/{captureId}` | Retrieve capture status and result | Required |
 | `GET` | `/api/v1/health` | Basic service health check | None in the current implementation (to be confirmed) |
+| `GET` | `/api/v1/ready` | Readiness check: the configuration is complete | None in the current implementation (to be confirmed) |
 
 The health endpoint must not expose secrets, tokens, internal configuration, or personal data.
 
@@ -541,7 +542,21 @@ The health endpoint should return a minimal response and must not expose:
 - Internal infrastructure details
 - Player information
 
-The initial MVP health endpoint indicates that the API handler is responding. Whether it should also check dependencies such as DynamoDB or SQS is a separate decision.
+The health endpoint only indicates that the API handler is responding. It never builds the capture service and never calls DynamoDB or SQS, so it returns `200` even if the configuration is missing. (Decided by the technical lead, 2026-11-26.)
+
+### 8.1 Ready Endpoint
+
+`GET /api/v1/ready`
+
+Checks that the configuration is complete (the queue URL and the table name are set and the AWS clients can be created). It does not call DynamoDB or SQS.
+
+Success: `200 {"status": "ready"}`
+
+Not ready: `503 {"error": {"code": "INTERNAL_ERROR", "message": "The service is not ready."}}`
+
+The response never names the missing variables. Their names are written only to the log.
+
+Not finished: the API Gateway route for `/api/v1/ready` is not added yet, because `infrastructure/template.yaml` belongs to the technical lead.
 
 ---
 
@@ -607,7 +622,7 @@ The following must be agreed and documented before full integration or productio
 1. Exact Cognito authorizer claims used for player identity (the API currently uses the `sub` claim).
 2. Retention of idempotency records and capture records, and cleanup of captures left in `RECEIVED`.
 3. Exact response schema for `result` and `error` of each status (the worker owner).
-4. Whether health checks are public, and whether they check dependencies.
+4. Whether the health and ready checks are public. (Decided 2026-11-26: health does not check dependencies; ready checks the configuration only.)
 5. Request-rate limits, and confirmation of the request body limit (2,000,000 bytes) and the minimum of 4 samples.
 6. Exact SQS message schema and versioning, queue `MaximumMessageSize` (1048576), encryption, dead-letter queue and retention.
 7. Worker retry and reconciliation behavior.
