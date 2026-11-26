@@ -8,6 +8,11 @@ Rules for this file:
 - AWS clients are created on the first request and then reused (warm starts).
 - The incoming event is never logged: it holds the player's claims and the route.
 - The variable names below are PROPOSED and not yet agreed with the technical lead.
+- GET /api/v1/health only says "the handler is alive". It never builds the
+  service, so it works even when the configuration is missing.
+- GET /api/v1/ready builds the service and says whether the configuration is
+  complete. It returns 503 when it is not. (Not finished: the API Gateway route
+  for /ready is not added; template.yaml belongs to the technical lead.)
 """
 
 import json
@@ -21,7 +26,7 @@ import boto3
 from capture_service import CaptureService
 from dynamodb_repository import DynamoDbCaptureRepository
 from errors import INTERNAL_ERROR, ApiError
-from http_api import handle_request
+from http_api import HEALTH_PATH, handle_request
 from inline_route_store import InlineRouteStore
 from sqs_queue import SqsCaptureQueue
 
@@ -30,6 +35,7 @@ logger = logging.getLogger(__name__)
 QUEUE_URL_ENV = "CAPTURE_QUEUE_URL"
 TABLE_NAME_ENV = "CAPTURES_TABLE_NAME"
 REQUIRED_ENV = (QUEUE_URL_ENV, TABLE_NAME_ENV)
+READY_PATH = "/api/v1/ready"
 
 # The service is built once and reused. A failed attempt is never stored.
 _cache: dict[str, CaptureService] = {}
@@ -75,10 +81,9 @@ def _get_service() -> CaptureService:
     return service
 
 
-def _server_error_response() -> dict:
-    body = ApiError(500, INTERNAL_ERROR, "An unexpected error occurred.").to_body()
+def _json_response(status_code: int, body: dict) -> dict:
     return {
-        "statusCode": 500,
+        "statusCode": status_code,
         "headers": {
             "Content-Type": "application/json",
             "Cache-Control": "no-store",
@@ -87,7 +92,44 @@ def _server_error_response() -> dict:
     }
 
 
+def _server_error_response() -> dict:
+    body = ApiError(500, INTERNAL_ERROR, "An unexpected error occurred.").to_body()
+    return _json_response(500, body)
+
+
+def _method_and_path(event: object) -> tuple[object, object]:
+    """Read method and path the same way http_api does. Never raises."""
+    if not isinstance(event, dict):
+        return None, None
+    context = event.get("requestContext")
+    http = context.get("http") if isinstance(context, dict) else None
+    method = http.get("method") if isinstance(http, dict) else None
+    return method, event.get("rawPath")
+
+
+def _ready_response() -> dict:
+    """200 when the configuration is complete, 503 otherwise. No details leak."""
+    try:
+        _get_service()
+    except ConfigurationError as error:
+        # Names only, never values. The response itself names nothing.
+        logger.error("Not ready, missing configuration: %s", ", ".join(error.missing))
+    except Exception as error:  # noqa: BLE001 - last safety net, nothing may leak
+        logger.error("Not ready, service failed: %s", type(error).__name__)
+    else:
+        return _json_response(200, {"status": "ready"})
+    body = ApiError(503, INTERNAL_ERROR, "The service is not ready.").to_body()
+    return _json_response(503, body)
+
+
 def lambda_handler(event: dict, context: object) -> dict:
+    method, path = _method_and_path(event)
+    if method == "GET" and path == HEALTH_PATH:
+        # Alive check only: must not depend on configuration or AWS.
+        return _json_response(200, {"status": "healthy"})
+    if method == "GET" and path == READY_PATH:
+        return _ready_response()
+
     try:
         service = _get_service()
     except ConfigurationError as error:

@@ -88,10 +88,15 @@ def set_env(monkeypatch, **overrides):
             monkeypatch.setenv(name, value)
 
 
-def health_event():
+def service_event():
+    """A request that needs the service: the status of a capture that does not exist."""
     return {
-        "rawPath": "/api/v1/health",
-        "requestContext": {"requestId": "req-1", "http": {"method": "GET"}},
+        "rawPath": "/api/v1/captures/capture_missing",
+        "requestContext": {
+            "requestId": "req-1",
+            "http": {"method": "GET"},
+            "authorizer": {"jwt": {"claims": {"sub": "player-1"}}},
+        },
     }
 
 
@@ -160,7 +165,7 @@ def test_missing_variable_returns_generic_500_and_logs_only_the_name(
 ):
     set_env(monkeypatch, **{missing: None})
 
-    response = capture_lambda.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(service_event(), None)
 
     assert_generic_500(response)
     assert missing in caplog.text
@@ -174,14 +179,14 @@ def test_missing_variable_returns_generic_500_and_logs_only_the_name(
 def test_blank_variable_counts_as_missing(monkeypatch, factory, caplog, blank):
     set_env(monkeypatch, CAPTURE_QUEUE_URL=blank)
 
-    response = capture_lambda.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(service_event(), None)
 
     assert_generic_500(response)
     assert "CAPTURE_QUEUE_URL" in caplog.text
 
 
 def test_all_missing_variables_are_listed(monkeypatch, factory, caplog):
-    response = capture_lambda.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(service_event(), None)
 
     assert_generic_500(response)
     for name in FULL_ENV:
@@ -189,11 +194,11 @@ def test_all_missing_variables_are_listed(monkeypatch, factory, caplog):
 
 
 def test_failed_configuration_is_not_cached(monkeypatch, factory):
-    assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 500
+    assert capture_lambda.lambda_handler(service_event(), None)["statusCode"] == 500
 
     set_env(monkeypatch)
 
-    assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 200
+    assert capture_lambda.lambda_handler(service_event(), None)["statusCode"] == 404
 
 
 def test_failure_while_creating_clients_is_generic_and_leaks_nothing(
@@ -206,7 +211,7 @@ def test_failure_while_creating_clients_is_generic_and_leaks_nothing(
 
     monkeypatch.setattr(capture_lambda, "_client_factory", broken_factory)
 
-    response = capture_lambda.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(service_event(), None)
 
     assert_generic_500(response)
     assert "RuntimeError" in caplog.text
@@ -228,7 +233,7 @@ def test_service_is_built_once_and_reused(monkeypatch, factory):
     set_env(monkeypatch)
 
     for _ in range(3):
-        assert capture_lambda.lambda_handler(health_event(), None)["statusCode"] == 200
+        assert capture_lambda.lambda_handler(service_event(), None)["statusCode"] == 404
 
     assert sorted(factory.requested) == ["dynamodb", "sqs"]
 
@@ -236,7 +241,13 @@ def test_service_is_built_once_and_reused(monkeypatch, factory):
 def test_health_works_through_lambda_handler(monkeypatch, factory):
     set_env(monkeypatch)
 
-    response = capture_lambda.lambda_handler(health_event(), None)
+    response = capture_lambda.lambda_handler(
+        {
+            "rawPath": "/api/v1/health",
+            "requestContext": {"requestId": "req-1", "http": {"method": "GET"}},
+        },
+        None,
+    )
 
     assert response["statusCode"] == 200
     assert json.loads(response["body"]) == {"status": "healthy"}
