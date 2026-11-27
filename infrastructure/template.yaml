@@ -2,6 +2,12 @@
 Transform: AWS::Serverless-2016-10-31
 Description: ConquestRunner serverless application
 
+Parameters:
+  FrontendOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Allowed browser frontend origin
+
 Globals:
   Function:
     Runtime: python3.13
@@ -9,14 +15,158 @@ Globals:
     MemorySize: 256
 
 Resources:
+  # Authentication
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: ConquestRunnerUsers
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: ConquestRunnerWeb
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # Capture storage
+  CapturesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  # Capture queue
+  CaptureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MaximumMessageSize: 1048576
+
+  # HTTP API and JWT authentication
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: "$default"
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - authorization
+          - content-type
+          - idempotency-key
+        MaxAge: 600
+      Auth:
+        DefaultAuthorizer: CognitoJwtAuthorizer
+        Authorizers:
+          CognitoJwtAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+              audience:
+                - !Ref CognitoUserPoolClient
+
+  # API Lambda
   ApiFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/api/
       Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          CAPTURE_QUEUE_URL: !Ref CaptureQueue
+          CAPTURES_TABLE_NAME: !Ref CapturesTable
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt CapturesTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt CaptureQueue.Arn
       Events:
         HealthCheck:
           Type: HttpApi
           Properties:
+            ApiId: !Ref HttpApi
             Path: /api/v1/health
             Method: GET
+            Auth:
+              Authorizer: NONE
+            PayloadFormatVersion: "2.0"
+
+        ReadinessCheck:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/v1/ready
+            Method: GET
+            Auth:
+              Authorizer: NONE
+            PayloadFormatVersion: "2.0"
+
+        SubmitCapture:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/v1/captures
+            Method: POST
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+            PayloadFormatVersion: "2.0"
+
+        GetCapture:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/v1/captures/{captureId}
+            Method: GET
+            Auth:
+              Authorizer: CognitoJwtAuthorizer
+            PayloadFormatVersion: "2.0"
+
+Outputs:
+  ApiUrl:
+    Description: ConquestRunner HTTP API URL
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+
+  CognitoUserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+
+  CapturesTableName:
+    Description: DynamoDB captures table name
+    Value: !Ref CapturesTable
+
+  CaptureQueueUrl:
+    Description: SQS capture queue URL
+    Value: !Ref CaptureQueue
