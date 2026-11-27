@@ -1,19 +1,24 @@
 # ConquestRunner — Worker Contract (API side)
 
-> **Status: DRAFT. Not agreed by the team.** Nothing here is implemented in `backend/worker/`
-> (all worker files are still empty placeholders) and nothing was run on AWS.
+> **Status: DRAFT, second revision. Not agreed by the team.** Nothing here is implemented in
+> `backend/worker/` (all worker files are still empty placeholders) and nothing was run on AWS.
 >
-> This document describes the boundary between the capture API and the worker. It is **not** a design of
-> the territory logic or of the game result. Those decisions belong to the team and are listed in
-> section 9 as open.
+> This document describes the boundary between the capture API and the worker, precisely enough to
+> implement the worker side. It is **not** a design of the territory logic or of the game result. Those
+> decisions, and the GPS plausibility thresholds, belong to the team and are listed in section 10.
 
 Every statement carries one label:
 
 | Label | Meaning |
 |---|---|
-| **[EXISTING]** | The API code in `backend/api/` already does this. It is covered by local tests with in-memory fakes. It is **not** verified on real AWS |
+| **[EXISTING]** | The API code in `backend/api/` already does or requires this. It is covered by local tests with in-memory fakes. It is **not** verified on real AWS |
 | **[PROPOSAL]** | Suggested worker behavior. It is not implemented and the team may change it |
 | **[OPEN]** | A decision nobody has made yet. This document does not make it |
+
+**Changes from the first draft:** the processing lease is now a numeric attribute instead of a
+comparison of `updatedAt` strings; an attempt token is part of the proposal; the final status and the
+`result`/`error` are written in one conditional write; section 2 and 3 now follow the code exactly; the
+rules for what `result`/`error` may contain are added.
 
 ---
 
@@ -23,183 +28,369 @@ Every statement carries one label:
 client -> API Gateway -> API Lambda -> DynamoDB (record) + SQS (one message) -> worker Lambda -> DynamoDB
 ```
 
-- The API Lambda accepts a route, stores a capture record and sends one SQS message.
-- The worker reads that message, checks and processes the route, and writes the final state to the
-  same DynamoDB record.
-- The client only ever talks to the API. It polls `GET /api/v1/captures/{captureId}`.
+The API Lambda accepts a route, stores a capture record and sends one SQS message. The worker reads that
+message, checks and processes the route, and writes the final state to the same DynamoDB record. The
+client only talks to the API and polls `GET /api/v1/captures/{captureId}`.
 
-## 2. What the API already guarantees [EXISTING]
+## 2. The SQS message [EXISTING]
 
-1. **One message per accepted capture.** Body (`schemaVersion` is `1`):
+The API calls `send_message` with **only** `QueueUrl` and `MessageBody`. No message attributes, no group
+id, no delay. The body is compact JSON text (from `serialize_message` in `backend/api/sqs_queue.py`):
 
-   ```json
-   {
-     "schemaVersion": 1,
-     "captureId": "capture_<32 hex>",
-     "playerId": "<cognito sub>",
-     "route": { "encoding": "gzip+base64", "data": "<base64 text>" }
-   }
-   ```
+```json
+{
+  "schemaVersion": 1,
+  "captureId": "capture_<32 hex characters>",
+  "playerId": "<cognito sub>",
+  "route": { "encoding": "gzip+base64", "data": "<base64 text>" }
+}
+```
 
-   Maximum size 1 MiB. `route.data` is base64, then gzip, then JSON. `unpack_route` in
-   `backend/api/inline_route_store.py` does this decoding and can be reused.
-2. **`playerId` is trustworthy.** It comes only from the verified token claim `sub`, never from the
-   request body or a header.
-3. **`captureId` is derived** from the player and the `Idempotency-Key` (a SHA-256 based value), so one
-   logical capture always has one record.
-4. **Write order in the API:** create the record as `RECEIVED` -> send the message -> mark the record
-   `PENDING`. `202` is returned only after the queue accepted the message.
-5. **The `PENDING` mark is conditional** (`status = RECEIVED`). If the worker already moved the record
-   on, the API does not overwrite the worker's progress.
-6. **A message can arrive before the record is `PENDING`.** The message is sent before the mark. So the
-   worker can read the record while it is still `RECEIVED`.
-7. **Duplicate messages are possible.** If the send succeeded but marking `PENDING` failed, the API
-   answers `503`, and a client retry with the same key sends the message again.
-8. **`RECEIVED` is hidden.** A client asking for a capture in `RECEIVED` gets `404`. Once the worker
-   moves it to `PROCESSING`, the client can see it.
-9. **Statuses** used by the code: `RECEIVED` (internal), `PENDING`, `PROCESSING`, `SUCCEEDED`,
-   `REJECTED`, `FAILED`.
-10. **Only structure is validated.** The route has 4 to 10,000 samples, finite numbers in range, strictly
-    increasing UTC timestamps. **Plausibility is not checked** (speed, jumps, GPS accuracy, loops).
-    `INVALID_ROUTE` is reserved for the worker.
-11. **The API changes a record only at the start** (create, then the `PENDING` mark). It never touches a
-    record afterwards and sets no TTL.
-12. **A capture is visible only to its owner.** The record carries `playerId`.
-13. **Logging rule in the API:** no GPS data, claims or tokens are logged.
-
-What the API does **not** have: any code that updates a record after `PENDING`. The worker's writes are
-new code.
-
-## 3. Proposed processing flow [PROPOSAL]
-
-(The lead agreed to this as a starting point on 2026-11-27.)
-
-1. Read the message. If it cannot be decoded, see section 7.
-2. Read the record by `captureId` (strongly consistent) and check that `playerId` matches the message.
-3. If the status is already final (`SUCCEEDED`, `REJECTED`, `FAILED`): do nothing and delete the message.
-4. Otherwise claim the record: move it to `PROCESSING` with a conditional write (section 4).
-5. Check plausibility, then calculate and store the territory result. (**[OPEN]**, section 9.)
-6. Write the final status with a conditional write (section 5), then delete the message.
-
-The worker never trusts anything in the route beyond what step 5 checks, and never logs GPS data.
-
-## 4. State transitions and conditional writes [PROPOSAL]
-
-Final states never change again.
-
-| From | To | Condition on the write |
+| Field | Type | Rule |
 |---|---|---|
-| `RECEIVED` or `PENDING` | `PROCESSING` | `status IN (RECEIVED, PENDING)` |
-| `PROCESSING` (lease expired) | `PROCESSING` | `status = PROCESSING AND updatedAt < :leaseCutoff` (reclaim, section 6) |
-| `PROCESSING` | `SUCCEEDED` or `REJECTED` | `status = PROCESSING` |
-| any non-final | `FAILED` | `status IN (RECEIVED, PENDING, PROCESSING)` |
-| final | anything | never. The condition fails, the worker deletes the message |
+| `schemaVersion` | number | `1` today |
+| `captureId` | string | `capture_` plus 32 hex characters. The primary identifier of the capture |
+| `playerId` | string | The Cognito `sub` from the verified token. Never taken from the client |
+| `route.encoding` | string | `gzip+base64` is the only value today |
+| `route.data` | string | ASCII, standard base64 alphabet with padding |
 
-Every write also sets `updatedAt`. If a conditional write fails, the worker re-reads the record and
-decides again. It must not retry blindly.
+Maximum message size: 1 MiB (the API refuses to send more).
 
-## 5. Idempotency [PROPOSAL]
+**Decoding steps** (the same as `unpack_route` in `backend/api/inline_route_store.py`):
 
-- The unit of idempotency is `captureId`. Processing the same message twice must give the same final
-  record.
-- The final write is conditional on `status = PROCESSING`, so a second worker that finishes later
-  cannot overwrite a result that is already final.
-- The calculation should be deterministic for the same route. Whether it is depends on the territory
-  logic, so this is **[OPEN]**.
-- An optional attempt token (a random value written at the claim and checked at the final write) would
-  stop a slow, reclaimed worker from finishing as if it still owned the record. It needs one extra
-  attribute on the capture item, which changes the data model, so the worker owner decides. **[OPEN]**
+1. Check `route.encoding == "gzip+base64"`. Anything else cannot be read.
+2. Base64-decode `route.data` strictly (reject characters outside the alphabet).
+3. Gzip-decompress the bytes.
+4. Parse the result as UTF-8 JSON.
 
-## 6. Crash after `PROCESSING` (lead's question 1) [PROPOSAL]
+**Decoded route document:**
 
-**The problem.** The worker sets `PROCESSING` and then crashes or times out. SQS delivers the message
-again after the visibility timeout. If the retry sees `PROCESSING` and gives up, the capture would be
-stuck for ever.
+```json
+{
+  "route": [
+    { "latitude": 35.0001, "longitude": 135.0001,
+      "timestamp": "2026-11-24T02:00:01.000Z", "accuracyMeters": 10 }
+  ]
+}
+```
 
-**Proposed recovery: a lease based on `updatedAt`.**
+(Fake values, for the shape only.)
 
-1. Claiming a record sets `status = PROCESSING` and `updatedAt = now`. This is the lease start.
-2. A retry that reads `PROCESSING` compares `updatedAt` with a **lease duration**:
-   - **Lease expired** (`updatedAt` is older than the lease): reclaim with the conditional write in
-     section 4 (`updatedAt < :leaseCutoff`) and process the capture again.
-   - **Lease still valid**: another worker may still be running. Do **not** process and do **not** delete
-     the message. Return it as failed so SQS makes it visible again later.
-3. The lease duration must be **longer than the worker Lambda timeout**, so a working worker is never
-   reclaimed. The queue's visibility timeout should be at least 6 times the worker timeout (AWS guidance
-   for Lambda event sources). The numbers are the lead's decision. **[OPEN]**
-4. Because the reclaim is a conditional write, two retries cannot both reclaim the same record.
+- `route` is a list of 4 to 10,000 samples, each with exactly `latitude`, `longitude`, `timestamp`,
+  `accuracyMeters`.
+- The API has already checked: all four fields are present, the numbers are finite and in range, the
+  timestamps are strictly increasing, and there are no other fields.
+- `timestamp` is an ISO 8601 UTC string ending in `Z`. Parse it with a real ISO 8601 parser and do not
+  assume a fixed number of fractional digits.
+- The API has **not** checked plausibility: speed, jumps between points, accuracy limits, route length,
+  closed loops. That is the worker's job and its thresholds are **[OPEN]** (section 10).
+- The route is **not** stored anywhere else. If the message is lost, the route is lost.
 
-**Limits of this proposal.**
+## 3. The DynamoDB capture record
 
-- If a capture keeps crashing the worker, it is retried until `maxReceiveCount`, then goes to the DLQ
-  (section 7). Reclaiming does not stop that loop by itself.
-- A scheduled sweeper that looks for old `PROCESSING` records is another option. It needs a way to find
-  them (a scan or an index), which the current table design does not have. **[OPEN]**
+### 3.1 Attributes the API writes and reads [EXISTING]
 
-## 7. Failed messages and the DLQ (lead's question 2) [OPEN]
+Table: one item per capture. Keys: `PK = "CAPTURE#<captureId>"` (String), `SK = "META"` (String).
 
-**Fact.** Moving a message to the DLQ does **not** change the DynamoDB record. A capture whose message
-went to the DLQ stays in `PENDING` or `PROCESSING` and the client polls it for ever. [EXISTING behavior
-of SQS and DynamoDB; nothing in the API or the worker updates the record today.]
+| Attribute | Type | Written by | Rule |
+|---|---|---|---|
+| `PK`, `SK` | S | API | Never change them |
+| `captureId` | S | API | Never change it |
+| `playerId` | S | API | Never change it. The API treats a capture whose `playerId` is not the caller as "not found" |
+| `requestHash` | S | API | SHA-256 of the route, used to detect reuse of an `Idempotency-Key`. Never change it |
+| `status` | S | API, then worker | One of `RECEIVED`, `PENDING`, `PROCESSING`, `SUCCEEDED`, `REJECTED`, `FAILED`. The API does **not** validate the value when it reads, so the worker must write only these six |
+| `createdAt` | S | API | ISO 8601 UTC. Never change it |
+| `updatedAt` | S | API, then worker | ISO 8601 with a time zone. Change it on every write |
+| `result` | M | worker | Optional. Shape **[OPEN]** |
+| `error` | M | worker | Optional. Shape **[OPEN]** |
 
-This document does **not** decide how the record becomes `FAILED`. Options for the team:
+The record never contains GPS data, and the worker must not add any.
+
+### 3.2 What the API requires when it reads the item [EXISTING]
+
+If any rule below is broken, the API cannot read the record. It returns `503 INTERNAL_ERROR` to the client,
+and keeps doing so for that capture.
+
+- `captureId`, `playerId`, `requestHash`, `status`, `createdAt`, `updatedAt` must be present and of type
+  String (`S`).
+- `createdAt` and `updatedAt` must parse as ISO 8601 **with** a time zone. Write UTC with a trailing `Z`
+  (for example `2026-11-27T03:04:05.123456Z`). Do not rely on comparing these strings with `<` or `>`.
+- `result` and `error` must be absent or of type **Map (`M`)**. A String, List or Number is an error.
+- Extra attributes (for example the lease and token below) are **ignored** by the API.
+- Numbers inside `result` and `error` are converted to a JSON integer when they are whole and to a float
+  otherwise.
+- `result` and `error` must contain only String, Number, Boolean, Null, List and Map values. **Binary and
+  the Set types (`SS`, `NS`, `BS`) are not JSON values.** Based on reading the code, a Set would not be
+  converted and the response would fail with `500`. This is not covered by a test.
+- A DynamoDB item is limited to 400 KB, so `result` and `error` must stay small. (How the territory is
+  stored is **[OPEN]**.)
+
+### 3.3 What a client receives [EXISTING]
+
+`GET /api/v1/captures/{captureId}` returns `captureId`, `status`, `createdAt`, `updatedAt` and:
+
+- `result`, only when `status = SUCCEEDED` **and** `result` is present on the record.
+- `error`, only when `status` is `REJECTED` or `FAILED` **and** `error` is present on the record.
+
+The maps are passed to the client as they are. Whatever the team decides for their shape is also the
+public API shape, so the map client must be told. A record in `RECEIVED` returns `404` to the client.
+
+### 3.4 Attributes the worker adds [PROPOSAL]
+
+| Attribute | Type | Purpose |
+|---|---|---|
+| `leaseExpiresAt` | N | Epoch seconds. Until then, one worker owns the capture |
+| `attemptToken` | S | A random value (for example a UUID) chosen at each claim. Identifies the current owner |
+| `attemptCount` | N | How many times the capture was claimed |
+
+The attribute names are **[OPEN]** for the worker owner. They change the data model in `docs/DATA_MODEL.md`
+(one more reason to agree on them). The API does not need them.
+
+## 4. Status transitions and conditional DynamoDB operations
+
+### 4.1 Allowed transitions
+
+| From | To | Done by | Label |
+|---|---|---|---|
+| (none) | `RECEIVED` | API, when it creates the record | [EXISTING] |
+| `RECEIVED` | `PENDING` | API, after the message was sent. Conditional on `status = RECEIVED` | [EXISTING] |
+| `RECEIVED` or `PENDING` | `PROCESSING` | worker (claim) | [PROPOSAL] |
+| `PROCESSING` with an expired lease | `PROCESSING` | worker (reclaim, same operation) | [PROPOSAL] |
+| `PROCESSING` | `SUCCEEDED` or `REJECTED` | the worker that holds the token | [PROPOSAL] |
+| any non-final | `FAILED` | worker, or a DLQ handler / sweeper (section 7) | [PROPOSAL] / [OPEN] |
+| `SUCCEEDED`, `REJECTED`, `FAILED` | anything | nobody. Final states never change | [PROPOSAL] |
+
+[EXISTING] The API's `PENDING` mark can never overwrite the worker's progress: if the worker claimed first,
+the API's condition fails and the API does nothing.
+
+### 4.2 Operations (all are single `UpdateItem` calls)
+
+Common: `Key` is `{"PK": {"S": "CAPTURE#<captureId>"}, "SK": {"S": "META"}}` and
+`ExpressionAttributeNames` is `{"#s": "status"}` (because `status` is a reserved word). Timestamps are
+ISO strings; epoch values are Numbers.
+
+**A. Claim or reclaim** (read the record first with a consistent read and check `playerId`, section 5):
+
+```
+UpdateExpression:    SET #s = :processing, updatedAt = :now, leaseExpiresAt = :lease,
+                         attemptToken = :token
+                     ADD attemptCount :one
+ConditionExpression: #s IN (:received, :pending)
+                     OR (#s = :processing
+                         AND (attribute_not_exists(leaseExpiresAt) OR leaseExpiresAt < :nowEpoch))
+ReturnValues:        ALL_NEW
+```
+
+`:lease` is `nowEpoch + L` (L is the lease length, section 6). `:token` is a new random string. A failed
+condition (`ConditionalCheckFailedException`) means the capture is final or another worker holds a valid
+lease. Re-read the record and decide again (section 5). Never retry the same write blindly.
+
+**B. Extend the lease** (optional, only for long jobs):
+
+```
+UpdateExpression:    SET leaseExpiresAt = :lease, updatedAt = :now
+ConditionExpression: #s = :processing AND attemptToken = :token
+```
+
+**C. Finish with `SUCCEEDED`:**
+
+```
+UpdateExpression:    SET #s = :succeeded, result = :result, updatedAt = :now
+                     REMOVE leaseExpiresAt
+ConditionExpression: #s = :processing AND attemptToken = :token
+```
+
+`:result` must be a DynamoDB Map (`{"M": {...}}`) that follows section 3.2.
+
+**D. Finish with `REJECTED`** (a permanent problem with the route):
+
+```
+UpdateExpression:    SET #s = :rejected, error = :error, updatedAt = :now
+                     REMOVE leaseExpiresAt
+ConditionExpression: #s = :processing AND attemptToken = :token
+```
+
+**E. Finish with `FAILED` by the worker that holds the token:** the same as D with `:failed`.
+
+**F. Finish with `FAILED` without a token** (a DLQ handler or sweeper, or the attempt limit in section 7):
+
+```
+UpdateExpression:    SET #s = :failed, error = :error, updatedAt = :now
+                     REMOVE leaseExpiresAt
+ConditionExpression: #s IN (:received, :pending, :processing)
+```
+
+Status and `result`/`error` are always written **in the same call**. Otherwise a client could see
+`SUCCEEDED` before the `result` exists (the API then returns no `result` at all).
+
+## 5. Duplicate delivery and idempotency
+
+[EXISTING] Duplicate messages are expected. The API sends a message before it marks `PENDING`. If the
+send worked but the mark failed, the client gets `503` and its retry (same `Idempotency-Key`) sends the
+same message again. Standard SQS can also deliver a message twice by itself. The worker can also receive a
+message while the record is still `RECEIVED`.
+
+The unit of idempotency is `captureId`. For every delivery the worker reads the record (consistent read)
+and acts as follows. [PROPOSAL]
+
+| What the worker finds | Action | Message |
+|---|---|---|
+| `RECEIVED` or `PENDING` | Claim (operation A), process | Delete after the final write succeeded |
+| `PROCESSING`, lease not expired | Do nothing. Another worker is running | **Keep**: report the invocation as failed so SQS delivers it again later |
+| `PROCESSING`, lease expired | Reclaim (operation A), process again | Delete after the final write succeeded |
+| `SUCCEEDED`, `REJECTED` or `FAILED` | Do nothing | Delete |
+| No record for `captureId` | Anomaly: the API creates the record before it sends the message. Process nothing | **Keep** (it ends in the DLQ) |
+| `playerId` differs between message and record | Anomaly. Process nothing. Log the IDs only | **Keep** (it ends in the DLQ) |
+
+Because every state change is conditional, two workers that receive the same message at the same time
+cannot both claim it: one claim succeeds, the other fails the condition and re-reads.
+
+Processing the same route twice must give the same final record. Whether the calculation is
+deterministic depends on the territory logic, so this is **[OPEN]**.
+
+## 6. Processing lease and attempt token (stale-worker protection) [PROPOSAL]
+
+**The problem.** A worker claims a capture and then crashes, times out or stalls. SQS delivers the message
+again. Without a lease, the capture stays `PROCESSING` for ever. A worker that only stalled could also wake
+up later and overwrite the result of the worker that took over.
+
+**Lease.**
+
+1. A claim sets `leaseExpiresAt = now + L`. While it is in the future, only the holder works on the capture.
+2. A later delivery that finds an expired lease reclaims the capture (operation A) with a **new** token.
+3. A delivery that finds a valid lease changes nothing and keeps the message.
+
+**Attempt token (stale-worker protection).** Every claim writes a new random `attemptToken`, and every
+later write (extend, success, rejected, failed with token) requires the token to match.
+
+- Worker A claims with token A and stalls past the lease.
+- Worker B reclaims with token B. The record now holds token B.
+- Worker A wakes up and tries to finish. Its condition `attemptToken = A` fails. A writes nothing.
+- When A loses ownership it reports its invocation as **failed** and does not delete anything. Reason: its
+  message handle may be stale, and a deleted message could be B's only copy. The next delivery finds a final
+  record and deletes the message. This costs one harmless extra delivery.
+
+**Choosing the lease length.** With `T` = worker function timeout, `L` = lease length, `V` = queue
+visibility timeout: `T < L <= V`. If `L <= T`, a healthy worker can be reclaimed. If `L > V`, a redelivered
+message still finds a valid lease and counts toward `maxReceiveCount` for nothing. AWS also advises `V` of at
+least 6 times `T` for Lambda event sources. Example only, not a decision: `T` = 60 s, `L` = 120 s,
+`V` = 360 s. The real values are **[OPEN]** (section 10).
+
+## 7. Retry and DLQ behavior
+
+### 7.1 Outcomes and message handling [PROPOSAL]
+
+| Situation | Final write | Message |
+|---|---|---|
+| Success | C (`SUCCEEDED`) | Delete |
+| The route fails the plausibility checks (permanent) | D (`REJECTED`) | Delete. Do not retry |
+| Temporary error (DynamoDB or an internal error) | None | Keep. SQS retries after `V` |
+| Another worker holds a valid lease | None | Keep |
+| Ownership lost (a token condition failed) | None | Keep |
+| Final state already reached | None | Delete |
+| Anomaly (no record, or `playerId` mismatch) | None | Keep |
+
+### 7.2 Unreadable messages [PROPOSAL]
+
+The API never produces these, so this is defensive. If the body is not JSON, `route.encoding` is unknown, the
+base64 or gzip is invalid, the route JSON is invalid, or `schemaVersion` is not `1`: if `captureId` and
+`playerId` can be read and the record matches, write `FAILED` (operation F) and delete the message.
+Otherwise keep the message so it ends in the DLQ. The exact `error` content is **[OPEN]**.
+
+### 7.3 Attempt limit [PROPOSAL]
+
+The claim increases `attemptCount`. Before claiming, if the stored `attemptCount` is already at or above
+`MAX_ATTEMPTS`, the worker writes `FAILED` (operation F) and deletes the message instead of processing again.
+This ends a capture that keeps crashing the worker. For it to work, `MAX_ATTEMPTS` must be **lower** than the
+queue's `maxReceiveCount`, so the worker sees the message before SQS sends it to the DLQ. Both numbers are
+**[OPEN]**.
+
+### 7.4 What the DLQ does not do [EXISTING behavior of AWS]
+
+Moving a message to the DLQ does **not** change the DynamoDB record. Neither the API nor the worker updates
+it today. A capture whose message reached the DLQ stays `PENDING` or `PROCESSING`, and the client polls it
+for ever. With 7.3 in place, the DLQ should receive only messages that never reach the claim step (an
+unreadable message, a missing record, a mismatch, or DynamoDB unavailable for the whole retry period).
+
+**How such a record becomes `FAILED` is an open infrastructure/worker decision [OPEN].** This document does
+not choose. Options:
 
 | Option | How | Weak point |
 |---|---|---|
-| A. DLQ consumer | A small Lambda reads the DLQ and marks the record `FAILED` | One more Lambda to build and deploy |
-| B. Worker on the last attempt | The worker checks the SQS receive count and writes `FAILED` before the final retry | Cannot help when the worker crashes or times out on that attempt |
-| C. Sweeper | A scheduled job marks old non-final records `FAILED` | Needs a way to find them; extra infrastructure |
-| D. Several of the above | For example B plus A as a safety net | More work |
+| A. DLQ handler | A small Lambda reads the DLQ and writes `FAILED` (operation F) | One more function to build and deploy |
+| B. Last-attempt write | The worker checks the SQS receive count and writes `FAILED` on the last attempt | Cannot help if the worker cannot start or crashes on that attempt |
+| C. Sweeper | A scheduled job marks old non-final records `FAILED` | Needs a way to find them (a scan or an index). The current table has none |
+| D. A mix | For example 7.3 plus A as a safety net | More work |
 
-Also open: what the worker does with a message it can never process (bad base64, bad gzip, bad JSON,
-unknown `schemaVersion`). The API never produces such a message, so this is defensive. Possible rule: if
-the `captureId` is readable, write `FAILED` and delete the message; otherwise let it go to the DLQ.
+## 8. Queue and Lambda settings that the worker depends on
 
-**Message handling summary** [PROPOSAL, except the DLQ outcome which is OPEN]:
-
-| Situation | Message | Record |
+| Setting | Value | Label |
 |---|---|---|
-| Final state already reached | Delete | Unchanged |
-| Success | Delete | `SUCCEEDED` |
-| Route fails plausibility (permanent) | Delete | `REJECTED` |
-| Temporary error (DynamoDB, internal) | Keep, SQS retries | Unchanged or `PROCESSING` with lease |
-| Lease still valid on another worker | Keep, SQS retries | Unchanged |
-| Retries exhausted, message in the DLQ | In the DLQ | **[OPEN]** (options above) |
+| Batch size | 1 (the lead's preference for the MVP) | [PROPOSAL] |
+| Partial batch response | Not needed with batch size 1. If the batch size grows, the function must report failed message ids (`ReportBatchItemFailures`), otherwise one failure retries the whole batch | [PROPOSAL] |
+| Worker timeout `T`, lease `L`, visibility timeout `V` | `T < L <= V`, `V` at least `6 * T` | values [OPEN] |
+| `maxReceiveCount` and DLQ | A DLQ is recommended. `MAX_ATTEMPTS` below `maxReceiveCount` | values [OPEN] |
+| Worker permissions on DynamoDB | `GetItem`, `UpdateItem` on the captures table, plus whatever the territory storage needs | [PROPOSAL] |
+| Worker permissions on SQS | Read and delete from the queue (the event source mapping uses the function role) | [PROPOSAL] |
+| Logging | Log `captureId`, the transition and `attemptCount`. **Never** log the message body, the route or coordinates | [PROPOSAL] |
 
-## 8. Batch size (lead's question 3)
+## 9. Exact fields the worker persists
 
-**Lead's direction: batch size 1 for the MVP.** [PROPOSAL, agreed as the lean]
+For the API to retrieve and show a capture correctly. Never change `PK`, `SK`, `captureId`, `playerId`,
+`requestHash` or `createdAt`.
 
-- One message per invocation. A success or failure applies to that one capture, so no partial batch
-  reporting is needed.
-- If the batch size is raised later, the function must report which messages failed
-  (`ReportBatchItemFailures`), otherwise one failure retries the whole batch. That is a later change.
-- This also keeps the lease from section 6 simple: one capture is claimed per invocation.
+| Event | `status` | `updatedAt` (S, ISO with `Z`) | `result` (M) | `error` (M) | Lease fields (proposal) |
+|---|---|---|---|---|---|
+| Claim or reclaim | `PROCESSING` | yes | no | no | set `leaseExpiresAt`, `attemptToken`; `attemptCount` +1 |
+| Success | `SUCCEEDED` | yes | **yes** (shape [OPEN]) | no | remove `leaseExpiresAt` |
+| Rejected | `REJECTED` | yes | no | **yes** (shape [OPEN]) | remove `leaseExpiresAt` |
+| Failed | `FAILED` | yes | no | **yes** (shape [OPEN]) | remove `leaseExpiresAt` |
 
-## 9. Pending team decisions [OPEN]
+Each row is one conditional `UpdateItem` (section 4.2). `result` and `error` follow section 3.2.
 
-These are **not** decided by the API side. The API stores `result` and `error` as opaque maps and does not
-interpret them.
+## 10. Pending team decisions [OPEN]
 
-1. **Final `result` shape** for `SUCCEEDED`: pending team decision. This includes the territory
-   representation (polygon format, coordinates, area and its unit), how overlap with other players is
-   resolved, and any score or XP.
-2. **Final `error` shape** for `REJECTED` and `FAILED`: pending team decision. `INVALID_ROUTE` is reserved
-   in the API contract. `docs/GAME_RULES.md` lists other codes (for example `CAPTURE_ALREADY_PROCESSED`);
-   they have **not** been reconciled with `docs/API_CONTRACT.md` section 6.
-3. **How `GET /api/v1/captures/{captureId}` shows `result` and `error`** to the client. Today the API
-   returns `captureId`, `status`, `createdAt` and `updatedAt`. Adding the fields needs the shapes from 1
-   and 2.
-4. **Territory data model** and where territories are stored (see `docs/DATA_MODEL.md`).
-5. **Plausibility rules** (maximum speed, jump distance, accuracy limit, minimum length, loop closing).
-6. **Lease duration, worker timeout, queue visibility timeout, `maxReceiveCount`.**
-7. **DLQ handling** (section 7) and **cleanup of records stuck in `RECEIVED`** (the API sets no TTL).
-8. **Attempt token** (section 5).
-9. **A way for clients to read territories.** The map design shows other players' areas. That needs a new
-   API route, which is not part of the current MVP.
+These are **not** decided by the API side. The API stores `result` and `error` as opaque maps and passes
+them through.
 
-## 10. Not covered
+1. **Final `result` shape** for `SUCCEEDED`: pending team decision. It covers the territory representation
+   (polygon format, coordinates, area and its unit), how overlap with other players is resolved, and any
+   score or XP.
+2. **Final `error` shape and codes** for `REJECTED` and `FAILED`: pending team decision. `INVALID_ROUTE` is
+   reserved in the API contract. `docs/GAME_RULES.md` lists other codes (for example
+   `CAPTURE_ALREADY_PROCESSED`); they have **not** been reconciled with `docs/API_CONTRACT.md` section 6.
+3. **GPS plausibility thresholds** (maximum speed, jump distance, accuracy limit, minimum length, loop
+   closing): pending team decision.
+4. **Territory rules and territory data model**, and where territories are stored (`docs/DATA_MODEL.md`).
+5. **Whether the calculation is deterministic**, so that processing twice gives the same result.
+6. **Lease and queue values:** `T`, `L`, `V`, `maxReceiveCount`, `MAX_ATTEMPTS`.
+7. **Names of the worker's attributes** (`leaseExpiresAt`, `attemptToken`, `attemptCount`) and whether to
+   use the attempt token.
+8. **How a record becomes `FAILED` after the DLQ** (section 7.4).
+9. **Cleanup of records stuck in `RECEIVED`** (the API sets no TTL).
+10. **A way for clients to read territories.** The map design shows other players' areas. That would be a
+    new API route, not part of the current MVP.
+11. **Hardening in the API** if the team wants it: converting Set values in `result`/`error`, or rejecting
+    them. Today the worker must avoid them.
+
+## 11. Suggested worker tests (local fakes, no AWS) [PROPOSAL]
+
+1. A message arrives while the record is `RECEIVED`; the worker claims it.
+2. The same message is delivered twice at once; only one claim succeeds.
+3. The record is final; the message is deleted and nothing is written.
+4. `PROCESSING` with a valid lease; nothing changes and the message is kept.
+5. `PROCESSING` with an expired lease; the capture is reclaimed with a new token.
+6. A stale worker finishes after a reclaim; its write is refused and nothing is overwritten.
+7. A permanent route problem writes `REJECTED` with `error`, and the message is deleted.
+8. A temporary DynamoDB error keeps the message and writes nothing.
+9. The attempt limit writes `FAILED`.
+10. An unreadable message and a missing record.
+11. `result` and `error` are written as Maps without Sets or Binary values.
+12. The API's `mark_pending` arriving after the claim leaves the status untouched (this already holds in the
+    API's own tests).
+
+## 12. Not covered
 
 - Any worker code, territory algorithm or game rule.
-- Infrastructure for the worker (see `docs/INFRASTRUCTURE_REQUIREMENTS.md` for the API Lambda only).
+- Infrastructure for the worker (`docs/INFRASTRUCTURE_REQUIREMENTS.md` covers the API Lambda only).
 - Alarms, dashboards, monitoring of the DLQ and any production security review.

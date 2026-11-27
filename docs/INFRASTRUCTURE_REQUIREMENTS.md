@@ -158,6 +158,12 @@ The worker unpacks `route.data` with base64 decode, then gzip decompress, then J
 Logging behaviour (REQUIRED to know): the code never logs the event, the GPS route, claims or tokens.
 On an error it logs only the exception type, the traceback frames and the request id.
 
+Package check (local, no AWS): `python scripts/check_package.py`, run from `backend/api`. It copies only
+the 11 modules above into an empty folder, starts a clean Python process, imports `capture_lambda` and
+calls it for `/health` (expects `200`) and `/ready` without configuration (expects `503`). It also
+confirms that no test code is imported and prints the size of the modules alone (about 15 KB, without
+boto3). It does **not** prove that the package works on the real Lambda runtime.
+
 ## 8. Health and readiness: expected behaviour
 
 Both routes are public (`GET`, no body, no `Idempotency-Key`). Both return `Content-Type: application/json`
@@ -189,7 +195,18 @@ Replace `<API_URL>` and `<TOKEN>` yourself. Never paste a real token into a chat
 8. Browser check: an `OPTIONS` preflight from the frontend origin with `idempotency-key` in
    `Access-Control-Request-Headers` is accepted.
 
-## 10. Not covered here
+## 10. Decisions recorded from the technical lead (2026-11-27)
+
+| Item | Decision |
+|---|---|
+| Stage name | The lead will check whether `$default` fits the SAM design and prefers to keep the exact path matching. The real `rawPath` must be verified after the first deployment before this is considered resolved. **Open until then** |
+| Queue `MaximumMessageSize` | Agreed: `1048576` |
+| CORS | Agreed: `idempotency-key`, `authorization`, `content-type`; methods `GET`, `POST`, `OPTIONS` |
+| Lambda timeout and memory | Start with 10 seconds and 256 MB, check CloudWatch after the first deployment, adjust if needed |
+| Review of the REQUIRED/PROPOSAL items | The lead checks them against the existing SAM design before implementing |
+| PR #2 | Stays a Draft until the deployed integration is verified |
+
+## 11. Not covered here
 
 - The worker, the territory logic and the final `result`/`error` shapes of a capture.
 - Retention and cleanup of records stuck in `RECEIVED`.
